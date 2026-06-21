@@ -1,0 +1,14 @@
+# Local config (contains keystore passwords)
+local.properties
+# Keystore files
+*.keystore
+*.jks
+# Build outputs
+/build/
+app/build/
+# IDE
+.idea/
+*.iml
+.DS_Store
+# Gradle
+.gradle/
