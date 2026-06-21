@@ -77,22 +77,66 @@ class XuexitongBrushRunner @Inject constructor(
         log("INFO", "拉取课程成功 (共 ${courses.size} 门)")
         onProgress(TaskProgress(taskId, account, BrushState.RUNNING, totalCourses = courses.size, currentPhase = "扫描到 ${courses.size} 门课程"))
 
-        courses.forEachIndexed { idx, course ->
+        // 过滤出需要学习的课程
+        val filteredCourses = courses.mapIndexedNotNull { idx, course ->
             val name = course.optString("courseName", "")
             val include = account.coursesCustom.includeCourses
             val exclude = account.coursesCustom.excludeCourses
-            if (exclude.isNotEmpty() && exclude.contains(name)) return@forEachIndexed
-            if (include.isNotEmpty() && !include.contains(name)) return@forEachIndexed
 
-            log("INFO", "[$name] 正在学习该课程")
-            onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
-                totalCourses = courses.size, doneCourses = idx, currentCourse = name,
-                currentPhase = "[$name] 刷课中 (${idx+1}/${courses.size})"))
-            brushCourse(account, course, log)
-            onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
-                totalCourses = courses.size, doneCourses = idx + 1, currentCourse = name,
-                currentPhase = "[$name] 完毕"))
-            log("INFO", "[$name] 课程学习完毕")
+            if (exclude.isNotEmpty() && exclude.any { name.contains(it, ignoreCase = true) }) {
+                return@mapIndexedNotNull null
+            }
+            if (include.isNotEmpty() && !include.any { name.contains(it, ignoreCase = true) }) {
+                return@mapIndexedNotNull null
+            }
+
+            idx to course
+        }
+
+        // 根据 VideoMode 决定课程遍历方式（等价 Go XueXiTongPart.go:125-138）
+        when (account.coursesCustom.videoMode) {
+            VideoMode.NORMAL -> {
+                // 普通模式：课程串行，任务点串行
+                filteredCourses.forEach { (idx, course) ->
+                    val name = course.optString("courseName", "")
+                    log("INFO", "[$name] 正在学习该课程")
+                    onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
+                        totalCourses = courses.size, doneCourses = idx, currentCourse = name,
+                        currentPhase = "[$name] 刷课中 (${idx+1}/${courses.size})"))
+                    brushCourse(account, course, log)
+                    onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
+                        totalCourses = courses.size, doneCourses = idx + 1, currentCourse = name,
+                        currentPhase = "[$name] 完毕"))
+                    log("INFO", "[$name] 课程学习完毕")
+                }
+            }
+            VideoMode.VIOLENT, VideoMode.DERED -> {
+                // 多课程模式(2) / 多任务点模式(3)：课程并发（等价 Go 的 go func() 启动所有课程）
+                coroutineScope {
+                    filteredCourses.map { (idx, course) ->
+                        launch {
+                            val name = course.optString("courseName", "")
+                            runCatching {
+                                log("INFO", "[$name] 正在学习该课程")
+                                onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
+                                    totalCourses = courses.size, doneCourses = idx, currentCourse = name,
+                                    currentPhase = "[$name] 刷课中 (${idx+1}/${courses.size})"))
+                                brushCourse(account, course, log)
+                                onProgress(TaskProgress(taskId, account, BrushState.RUNNING,
+                                    totalCourses = courses.size, doneCourses = idx + 1, currentCourse = name,
+                                    currentPhase = "[$name] 完毕"))
+                                log("INFO", "[$name] 课程学习完毕")
+                            }.onFailure { e ->
+                                android.util.Log.e("YatoriXXT", "course[$name] exception", e)
+                                log("ERROR", "[$name] 课程异常: ${e.message}")
+                            }
+                        }
+                    }.joinAll()
+                }
+            }
+            VideoMode.NONE -> {
+                log("INFO", "VideoMode=不刷，跳过所有课程")
+            }
         }
         log("INFO", "所有待学习课程学习完毕")
     }
@@ -778,6 +822,7 @@ class XuexitongBrushRunner @Inject constructor(
 
                 wv.webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: android.webkit.WebView, url: String) {
+                        if (!cont.isActive) return  // 页面加载完但协程已取消，直接返回
                         // 提取 cozeEnc 等隐藏字段
                         view.evaluateJavascript("""(function(){
                             function v(id){var e=document.getElementById(id);return e?e.value:'';}
@@ -816,6 +861,7 @@ class XuexitongBrushRunner @Inject constructor(
     }
 
     private suspend fun callXxtAi(p: XxtAiParams, content: String): List<String> = withContext(Dispatchers.IO) {
+        ensureActive()  // 检查协程是否已取消
         if (p.cozeEnc.isEmpty()) return@withContext emptyList()
         val reqBody = """[{"role":"user","content":${org.json.JSONObject.quote(content)},"baseData":{"conversationId":"${p.conversationId}","userId":"${p.userId}","appId":"1192651262850","botId":"7438777570621653018","custom_variables":{"courseName":"${p.courseName}","studentName":"${p.studentName}","weakKnowledgePoint":"{}"},"shortcut_command":{},"sourceInfo":"","sdkFlag":"false","courseid":"${p.courseId}","clazzid":"${p.classId}","personid":"${p.personId}"}}]"""
         val url = "https://stat2-ans.chaoxing.com/stat2/bot/talk-v1?cozeEnc=${p.cozeEnc}&botId=7438777570621653018&userId=${p.userId}&appId=1192651262850&courseid=${p.courseId}&clazzid=${p.classId}&ut=s"
@@ -831,13 +877,16 @@ class XuexitongBrushRunner @Inject constructor(
             ).execute()
         }.getOrElse { e -> android.util.Log.e("YatoriAI", "AI request failed", e); return@withContext emptyList() }
         val sb = StringBuilder()
-        resp.body?.byteStream()?.bufferedReader()?.forEachLine { line ->
-            line.split("\$_\$").forEach { part ->
-                val p2 = part.trim()
-                if (p2.isEmpty() || p2.startsWith("server-")) return@forEach
-                runCatching {
-                    val j = org.json.JSONObject(p2)
-                    if (j.optString("type") == "coreAnswer") sb.append(j.optString("content"))
+        resp.body?.byteStream()?.bufferedReader()?.use { reader ->
+            reader.lineSequence().forEach { line ->
+                ensureActive()  // 每读一行检查取消状态
+                line.split("\$_\$").forEach { part ->
+                    val p2 = part.trim()
+                    if (p2.isEmpty() || p2.startsWith("server-")) return@forEach
+                    runCatching {
+                        val j = org.json.JSONObject(p2)
+                        if (j.optString("type") == "coreAnswer") sb.append(j.optString("content"))
+                    }
                 }
             }
         }

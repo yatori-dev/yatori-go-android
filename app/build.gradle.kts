@@ -21,8 +21,8 @@ android {
         applicationId = "com.yatori.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26062102
-        versionName = "1.1.2"
+        versionCode = 26062201
+        versionName = "1.2.0"
     }
 
     signingConfigs {

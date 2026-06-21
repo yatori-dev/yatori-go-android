@@ -10,6 +10,16 @@
 
 <div align="center"><img width="125px" src="https://img.shields.io/badge/Android-building-r.svg?logo=android"></img> <img width="80px" src="https://img.shields.io/github/stars/yatori-dev/yatori-go-android.svg"></img> <img width="90px" src="https://img.shields.io/github/downloads/yatori-dev/yatori-go-android/total.svg"></img> <img width="240px" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg"></img></div>
 
+## 简介
+
+Yatori课程助手，支持英华慕课(英华学堂及所有英华套壳平台)、海旗科技、超星学习通、智慧职教资源库等平台。其它平台开发中。
+
+该项目主要用于解放大学生网课，减少无意义的水课网课让大学生能够做其他更值得去做的事情，而不是把时间浪费在网课上（指无意义的网课）。
+
+当然对于有意义的网课我们还是不提倡使用yatori的，我们主要针对无意义网课。
+
+Tips: 本项目**yatori-go-android**是基于**yatori-go-core**项目，将核心逻辑使用`Kotlin`重写了，所以这是一个纯 Kotlin/Android 原生应用。
+
 ## 📢作者有话说
 
 > 1、项目刚开始，众多功能未能使用以及存在bug是正常的，开发需要平台账号进行测试。
@@ -20,7 +30,7 @@
 
 > 推荐的一些计算机技术QQ交流群：
 >
-> * [932447008](https://qm.qq.com/q/KREkme4rYc)
+> * [932447008](https://qm.qq.com/q/KREkme4rYc) (未满)
 >
 
 ## 🎯功能/特性：
@@ -45,7 +55,7 @@
 | 海旗科技 | 已测试登录与课程获取（其余功能未知）| 开发中 🚧 |
 | 仓辉实训 | 无账号测试，功能未知可用性 | 开发中 🚧 |
 | 智慧职教（资源库） | 默认秒刷(目前只支持Cookie登录方式)  | 已完成 ✅ |
-| 学习通 | 支持绕过人脸认证，支持自动写章测、作业、考试。 | 已完成 ✅ |
+| 学习通 | 支持绕过人脸认证，支持自动写章测、作业、考试。<br>支持多课程模式和多任务点模式。 | 已完成 ✅ |
 | 创能实训 | 无账号测试，功能未知可用性 | 开发中 🚧 |
 | 社会公益课 | 无账号测试，功能未知可用性 | 开发中 🚧 |
 | 重庆工业学院CQIE | 无账号测试，功能未知可用性 | 开发中 🚧 |
@@ -78,4 +88,6 @@
 > 他人或组织使用本代码进行的任何违法行为与本人无关，该代码纯技术学习交流。
 
 ## 相关技术参考引用：
-> Yatori系列项目
+> Yatori系列项目：
+> 
+> * [yatori-go-core](https://github.com/yatori-dev/yatori-go-core)
