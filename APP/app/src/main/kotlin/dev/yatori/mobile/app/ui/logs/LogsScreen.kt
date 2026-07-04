@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +49,7 @@ import dev.yatori.mobile.app.ui.nav.Route
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.localFullTime
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
@@ -96,8 +99,18 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
         }
     }
 
-    fun reload() {
-        scope.launch {
+    val listState = rememberLazyListState()
+    // True when the user is at (or very near) the top — used to decide auto-scroll on refresh.
+    val isAtTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 80 } }
+
+    // While the log tab is active: refresh every 3 s.
+    // • On first activation (returning from anywhere) → always scroll to top.
+    // • On subsequent refreshes → only scroll if user was already at the top.
+    LaunchedEffect(isActive) {
+        if (!isActive) return@LaunchedEffect
+        var firstRun = true
+        while (true) {
+            val shouldScroll = firstRun || isAtTop
             val processed = withContext(Dispatchers.IO) {
                 runCatching { repo.pollLogs() }
                 val raw = repo.currentSessionLogs()
@@ -106,9 +119,13 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
                     .distinctBy { it.id }
             }
             all = processed
+            if (shouldScroll && processed.isNotEmpty()) {
+                listState.scrollToItem(0)
+            }
+            firstRun = false
+            delay(3_000)
         }
     }
-    LaunchedEffect(isActive) { if (isActive) reload() }
 
     // Recompute only when the underlying data or filter criteria change.
     val filtered = remember(all, query, levelFilter) {
@@ -136,7 +153,7 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
                                         pendingExport = zip
                                         saveLogLauncher.launch(zip.name)
                                     }
-                                    .onFailure { Toast.makeText(context, "导出失败", Toast.LENGTH_SHORT).show() }
+                                    .onFailure { e -> Toast.makeText(context, "导出失败：${e.message}", Toast.LENGTH_LONG).show() }
                             }
                         })
                         TopBarAction(Icons.Rounded.IosShare, "分享 ZIP", onClick = {
@@ -144,9 +161,9 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
                                 prepareLogExport(container, context)
                                     .onSuccess { zip ->
                                         shareLogExport(context, zip)
-                                            .onFailure { Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show() }
+                                            .onFailure { e -> Toast.makeText(context, "分享失败：${e.message}", Toast.LENGTH_LONG).show() }
                                     }
-                                    .onFailure { Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show() }
+                                    .onFailure { e -> Toast.makeText(context, "分享失败：${e.message}", Toast.LENGTH_LONG).show() }
                             }
                         })
                         NestedOverflowMenu(
@@ -185,6 +202,7 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
                 )
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection).padding(horizontal = 12.dp),
                     contentPadding = PaddingValues(bottom = bottomPadding + 16.dp, top = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),

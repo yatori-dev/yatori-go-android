@@ -14,6 +14,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dev.yatori.mobile.app.MainActivity
 import dev.yatori.mobile.app.di.AppContainer
+import dev.yatori.mobile.app.platform.platformDisplayName
 import dev.yatori.mobile.runtime.operation.Operation
 import dev.yatori.mobile.runtime.operation.OperationStatus
 import dev.yatori.mobile.runtime.operation.OperationType
@@ -88,8 +89,8 @@ class OperationForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val builder = NotificationCompat.Builder(this, ONGOING_CHANNEL_ID)
-            .setContentTitle(active?.let { "正在执行：${it.platform}" } ?: "Yatori 运行中")
-            .setContentText(active?.let { "${it.accountMasked}  ${if (it.total > 0) "${it.completed}/${it.total}" else it.detail}" } ?: "等待任务")
+            .setContentTitle(active?.let { "正在进行：${opDisplayTitle(it)}" } ?: "Yatori 运行中")
+            .setContentText(active?.detail?.ifBlank { null } ?: "等待任务")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -97,9 +98,7 @@ class OperationForegroundService : Service() {
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setContentIntent(openIntent)
 
-        if (active != null && active.total > 0) {
-            builder.setProgress(active.total, active.completed, false)
-        }
+        // No progress bar — subtitle already shows the current task name.
         val cancelIntent = PendingIntent.getService(
             this,
             1,
@@ -122,12 +121,17 @@ class OperationForegroundService : Service() {
             val failed = op.status == OperationStatus.FAILED
             val title = if (failed) "任务执行失败" else "任务已完成"
             val detail = buildString {
-                append(op.platform)
-                if (op.accountMasked.isNotBlank()) append(" / ").append(op.accountMasked)
-                if (op.detail.isNotBlank()) append(" / ").append(op.detail)
+                append(opDisplayTitle(op))
+                if (op.detail.isNotBlank()) append("  ").append(op.detail)
             }
             notificationManager().notify(finishedNotificationId(op.id), buildFinishedNotification(title, detail, failed))
         }
+    }
+
+    private fun opDisplayTitle(op: Operation): String {
+        val platformName = platformDisplayName(op.platform, fallback = op.platform)
+        return if (op.accountMasked.isNotBlank()) "$platformName（${op.accountMasked}）"
+        else platformName
     }
 
     private fun buildFinishedNotification(title: String, detail: String, failed: Boolean): Notification {

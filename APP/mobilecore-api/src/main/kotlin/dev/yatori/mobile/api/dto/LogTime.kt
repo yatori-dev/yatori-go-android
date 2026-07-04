@@ -23,9 +23,13 @@ fun LogEntry.localShortTime(zoneId: ZoneId = ZoneId.systemDefault()): String =
     formatLogTime(time, SHORT_LOG_TIME_FORMATTER, zoneId)
 
 /** Human-readable log line for txt export. JSONL export keeps the original raw timestamp. */
-fun LogEntry.localReadableLine(zoneId: ZoneId = ZoneId.systemDefault()): String =
-    "${localFullTime(zoneId)} [${level.uppercase(Locale.ROOT)}] " +
-        "$source${if (platform.isNotBlank()) "($platform)" else ""}: $message"
+fun LogEntry.localReadableLine(zoneId: ZoneId = ZoneId.systemDefault()): String {
+    val lvl = (level ?: "").uppercase(Locale.ROOT)
+    val src = source ?: ""
+    val plat = platform ?: ""
+    val msg = message ?: ""
+    return "${localFullTime(zoneId)} [$lvl] $src${if (plat.isNotBlank()) "($plat)" else ""}: $msg"
+}
 
 private fun formatLogTime(raw: String, formatter: DateTimeFormatter, zoneId: ZoneId): String {
     val value = raw.trim()

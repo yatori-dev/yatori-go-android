@@ -170,13 +170,13 @@ func RunTask(sessionJSON, taskJSON string) (result string) {
 	if input.Platform == "" {
 		input.Platform = sess.Platform
 	}
-	logInfo(input.Platform, "提交任务 id="+input.ID)
+	logDebug(input.Platform, "提交任务 id="+input.ID)
 	res, err := dispatchRunTask(sess, input)
 	if err != nil {
 		logError(input.Platform, "任务失败："+err.Error())
 		return errResp(err.Error())
 	}
-	logInfo(input.Platform, "任务完成 "+res.Status+" id="+input.ID)
+	logDebug(input.Platform, "任务完成 "+res.Status+" id="+input.ID)
 	return okResp(res)
 }
 
@@ -370,6 +370,6 @@ func CancelLogin(taskID string) (result string) {
 	if !pendingLogins.delete(taskID) {
 		return errResp(fmt.Sprintf("taskId %q not found or already cancelled", taskID))
 	}
-	logInfo("", "CancelLogin: cancelled taskId="+taskID)
+	logInfo("", "取消登录 taskId="+taskID)
 	return okResp(CancelLoginResult{Status: LoginStatusCancelled, TaskID: taskID})
 }

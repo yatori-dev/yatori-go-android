@@ -2,7 +2,7 @@ package mobilecore
 
 import "sync"
 
-const Version = "0.1.0-mobile"
+const Version = "0.1.1-mobile"
 
 type runtimeState struct {
 	mu          sync.RWMutex

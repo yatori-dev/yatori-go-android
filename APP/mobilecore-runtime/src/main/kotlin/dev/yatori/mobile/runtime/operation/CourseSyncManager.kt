@@ -118,7 +118,7 @@ class CourseSyncManager(
                 submitted.addAll(runXuexitongCourses(session, plan, opId, courses, emit))
                 controller.markDone(
                     opId,
-                    detail = if (controller.isCancelling(opId)) "cancelled submitted=${submitted.size}" else "done submitted=${submitted.size}",
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
                 )
                 return submitted
             }
@@ -128,7 +128,7 @@ class CourseSyncManager(
                 submitted.addAll(runYinghuaMode2Courses(session, plan, opId, courses, emit))
                 controller.markDone(
                     opId,
-                    detail = if (controller.isCancelling(opId)) "cancelled submitted=${submitted.size}" else "done submitted=${submitted.size}",
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
                 )
                 return submitted
             }
@@ -141,13 +141,14 @@ class CourseSyncManager(
                     .filter { !it.isFinished() && it.id !in plan.completedTaskIds }
                     .forEach { pending.add(Pending(course, it)) }
             }
-            controller.updateProgress(opId, completed = 0, total = pending.size, detail = "tasks=${pending.size}")
+            controller.updateProgress(opId, completed = 0, total = pending.size, detail = "共 ${pending.size} 个任务")
 
             for ((index, p) in pending.withIndex()) {
                 if (controller.isCancelling(opId)) {
                     emit(SyncEvent("warn", "已收到取消请求，停止运行", plan.platform))
                     break
                 }
+                controller.updateProgress(opId, completed = index, total = pending.size, detail = p.task.name.ifBlank { p.task.id })
                 runCatching { runOneTask(session, p.task, plan, opId, emit) }
                     .onSuccess { r ->
                         submitted.add(p.task.id)
@@ -156,7 +157,7 @@ class CourseSyncManager(
                     .onFailure { e ->
                         emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
                     }
-                controller.updateProgress(opId, completed = index + 1, detail = "${index + 1}/${pending.size}")
+                controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
             }
 
             if (!controller.isCancelling(opId) && session.platform == "xuexitong" && plan.answerPolicy.enabled) {
@@ -173,11 +174,11 @@ class CourseSyncManager(
         } catch (e: CancellationException) {
             if (controller.isCancelling(opId)) {
                 emit(SyncEvent("warn", "课程同步已取消：${e.message}", plan.platform))
-                controller.markDone(opId, detail = "cancelled submitted=${submitted.size}")
+                controller.markDone(opId, detail = "已取消，已提交 ${submitted.size} 个")
                 return submitted
             }
             emit(SyncEvent("error", "课程同步已取消：${e.message}", plan.platform))
-            controller.markFailed(opId, detail = e.message ?: "cancelled")
+            controller.markFailed(opId, detail = e.message ?: "同步失败")
             throw e
         } catch (e: Throwable) {
             emit(SyncEvent("error", "课程同步失败：${e.message}", plan.platform))

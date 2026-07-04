@@ -4,7 +4,7 @@ import com.google.gson.JsonObject
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.MobileConfig
 import dev.yatori.mobile.app.platform.platformDisplayName
-import dev.yatori.mobile.app.ui.courses.accountCardTitle
+import dev.yatori.mobile.app.ui.courses.accountSnippetForRemark
 import dev.yatori.mobile.runtime.StoredSession
 
 internal const val SYSTEM_GO_CORE_LABEL = "系统/GoCore"
@@ -29,11 +29,13 @@ internal fun logDisplayName(
             ?.firstOrNull { it.matchesAccount(matched.platform, matched.account) }
             ?.str("remarkName")
             .orEmpty()
-        return accountCardTitle(
-            account = matched.account,
-            platformName = platformDisplayName(matched.platform, fallback = matched.platform),
-            remarkName = remark,
-        ).title
+        val platformName = platformDisplayName(matched.platform, fallback = matched.platform)
+        return if (remark.isNotBlank()) {
+            val snippet = accountSnippetForRemark(matched.account)
+            "$remark（$snippet）"
+        } else {
+            "$platformName（${matched.account}）"
+        }
     }
 
     return platformDisplayName(platform, fallback = SYSTEM_GO_CORE_LABEL)

@@ -52,9 +52,17 @@ class MobilecoreStore(
         io.write(File(sessionsDir, sessionFileName(session.platform, session.account, url)), gson.toJson(stored))
     }
 
-    fun loadSession(platform: String, account: String, url: String = ""): SessionData? =
-        io.read(File(sessionsDir, sessionFileName(platform, account, url)))
-            ?.let { gson.fromJson(it, StoredSession::class.java).session }
+    fun loadSession(platform: String, account: String, url: String = ""): SessionData? {
+        // Try URL-keyed file first; if not found, fall back to legacy no-URL file (migration).
+        if (url.isNotBlank()) {
+            val urlFile = File(sessionsDir, sessionFileName(platform, account, url))
+            if (urlFile.exists()) {
+                return io.read(urlFile)?.let { runCatching { gson.fromJson(it, StoredSession::class.java).session }.getOrNull() }
+            }
+        }
+        return io.read(File(sessionsDir, sessionFileName(platform, account, "")))
+            ?.let { runCatching { gson.fromJson(it, StoredSession::class.java).session }.getOrNull() }
+    }
 
     fun listSessions(): List<StoredSession> =
         sessionsDir.listFiles { f -> f.name.endsWith(".json") }

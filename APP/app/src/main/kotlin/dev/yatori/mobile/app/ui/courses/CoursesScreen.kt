@@ -56,6 +56,7 @@ import dev.yatori.mobile.runtime.operation.Operation
 import dev.yatori.mobile.runtime.operation.OperationController
 import dev.yatori.mobile.runtime.operation.OperationStatus
 import dev.yatori.mobile.runtime.operation.OperationType
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -69,7 +70,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** Courses tab: account cards, course sync, rule editing, and batch-run entry. */
 @Composable
-fun CoursesScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp) {
+fun CoursesScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isActive: Boolean = false) {
     val repo = container.repository
     val scrollBehavior = MiuixScrollBehavior()
     var sessions by remember { mutableStateOf<List<StoredSession>>(emptyList()) }
@@ -79,14 +80,28 @@ fun CoursesScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp) {
     val questionHistory by container.operationController.questionHistory.collectAsState()
     val pendingTaskChallenges by container.pendingTaskChallengesFlow.collectAsState()
     val pendingAnswerEdits by container.pendingAnswerEditsFlow.collectAsState()
-    // Load config once per session-list change; avoids per-card disk IO on every recomposition.
-    val savedConfig = remember(sessions) { repo.loadSavedConfig() }
+    // reloadTick forces savedConfig to reload even when sessions content didn't change (e.g. remark update).
+    var reloadTick by remember { mutableStateOf(0) }
+    val savedConfig = remember(sessions, reloadTick) { repo.loadSavedConfig() }
     val allAccountsRunning = sessions.isNotEmpty() && sessions.all { session -> operations.accountRunOp(session, sessions)?.isActiveRun() == true }
 
     fun reload() {
+        reloadTick++
         sessions = repo.listSessions()
     }
-    LaunchedEffect(Unit) { reload() }
+
+    // Reload on first composition and periodically. isActive change (tab switch) does NOT
+    // trigger an immediate reload to avoid lag; the 60-second timer is enough for this low-priority tab.
+    LaunchedEffect(Unit) {
+        reload()
+    }
+    LaunchedEffect(isActive) {
+        if (!isActive) return@LaunchedEffect
+        while (true) {
+            delay(60_000L)
+            reload()
+        }
+    }
 
     val barBackdrop = rememberBarBackdrop()
     val barTint = MiuixTheme.colorScheme.surface.copy(alpha = 0.7f)
@@ -177,6 +192,7 @@ fun CoursesScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp) {
                         context = context,
                         platform = s.platform,
                         account = s.account,
+                        url = s.urlOf(),
                         dryRun = false,
                     )
                 }

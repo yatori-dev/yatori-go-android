@@ -37,6 +37,7 @@ class CourseSyncWorker(
         val container = AppContainer.from(applicationContext)
         val platform = inputData.getString(KEY_PLATFORM) ?: return Result.failure()
         val account = inputData.getString(KEY_ACCOUNT) ?: return Result.failure()
+        val url = inputData.getString(KEY_URL) ?: ""
         val dryRun = inputData.getBoolean(KEY_DRY_RUN, false)
         val keywords = inputData.getStringArray(KEY_KEYWORDS)?.toList() ?: emptyList()
         val completed = inputData.getStringArray(KEY_COMPLETED)?.toList() ?: emptyList()
@@ -45,7 +46,25 @@ class CourseSyncWorker(
         // Silently re-login with saved credentials to refresh the session cookie before the run.
         // Skips if: no stored credentials, platform requires captcha, or refreshed recently.
         val refreshedSession = tryRefreshSession(container, platform, account)
-        val session = refreshedSession ?: container.repository.getSession(platform, account) ?: return Result.failure()
+        val session = refreshedSession
+            ?: container.repository.getSession(platform, account, url)
+            // Last-resort fallback: scan all stored sessions for a matching (platform, account).
+            // This handles URL hash mismatches and legacy no-URL session files.
+            ?: container.repository.listSessions()
+                .firstOrNull { it.platform == platform && it.account == account }
+                ?.session
+            ?: run {
+                appendRunEvent(
+                    container,
+                    SyncEvent(
+                        level = "error",
+                        message = "未找到 $platform 账号的 session，请重新登录后再试",
+                        platform = platform,
+                        account = account,
+                    ),
+                )
+                return Result.failure()
+            }
         val rule = ruleFromSavedConfig(container, platform, account, keywords)
 
         val plan = RunPlan(
@@ -92,6 +111,7 @@ class CourseSyncWorker(
     companion object {
         const val KEY_PLATFORM = "platform"
         const val KEY_ACCOUNT = "account"
+        const val KEY_URL = "url"
         const val KEY_DRY_RUN = "dry_run"
         const val KEY_KEYWORDS = "keywords"
         const val KEY_COMPLETED = "completed"
@@ -101,11 +121,18 @@ class CourseSyncWorker(
         internal const val REFRESH_COOLDOWN_MS = 30L * 60 * 1000
         internal val lastRefreshAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+        /**
+         * Platforms that require captcha for login — starting a login for these may invalidate
+         * the current session token, so tryRefreshSession skips them entirely.
+         */
+        internal val CAPTCHA_PLATFORMS = setOf("yinghua", "cqie", "qingshuxuetang")
+
         /** Enqueues a unique resumable sync plan for (platform, account). */
         fun enqueue(
             context: Context,
             platform: String,
             account: String,
+            url: String = "",
             keywords: List<String> = emptyList(),
             dryRun: Boolean = false,
             completed: List<String> = emptyList(),
@@ -115,6 +142,7 @@ class CourseSyncWorker(
                     workDataOf(
                         KEY_PLATFORM to platform,
                         KEY_ACCOUNT to account,
+                        KEY_URL to url,
                         KEY_DRY_RUN to dryRun,
                         KEY_KEYWORDS to keywords.toTypedArray(),
                         KEY_COMPLETED to completed.toTypedArray(),
@@ -144,6 +172,12 @@ private suspend fun tryRefreshSession(
     platform: String,
     account: String,
 ): dev.yatori.mobile.api.dto.SessionData? {
+    // Captcha platforms (yinghua, cqie, qingshuxuetang) cannot be auto-refreshed here.
+    // More importantly, initiating a StartLogin for these platforms may invalidate the
+    // current server-side session token, breaking the subsequent getCourses call.
+    // The UI-driven LoginController (with OCR) handles re-login for these platforms.
+    if (platform in CourseSyncWorker.CAPTCHA_PLATFORMS) return null
+
     val key = "$platform/$account"
     val now = System.currentTimeMillis()
     val last = CourseSyncWorker.lastRefreshAt[key] ?: 0L

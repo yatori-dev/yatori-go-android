@@ -7,6 +7,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -61,6 +63,7 @@ import dev.yatori.mobile.app.ui.theme.LocalThemeState
 import dev.yatori.mobile.api.dto.HealthInfo
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.runtime.operation.OperationStatus
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -132,6 +135,15 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
 
     LaunchedEffect(Unit) { refresh(showToast = false) }
 
+    // Refresh recent events every 10 s while home tab is in composition.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(10_000L)
+            runCatching { repo.pollLogs() }
+            recent = repo.currentSessionLogs().takeLast(5).reversed()
+        }
+    }
+
     val barBackdrop = rememberBarBackdrop()
     val barTint = MiuixTheme.colorScheme.surface.copy(alpha = 0.7f)
     // Cache disk reads; recompute only when accountCount changes (i.e. after refresh).
@@ -176,7 +188,7 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
 
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 18.dp, bottom = 6.dp, end = 4.dp),
+                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 18.dp, bottom = 6.dp, end = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -186,7 +198,16 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
                         style = MiuixTheme.textStyles.subtitle,
                     )
                     if (hasFinishedOp) {
-                        TextButton(text = "清理记录", onClick = { container.operationController.clearFinished() })
+                        Text(
+                            "清理记录",
+                            modifier = Modifier.clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { container.operationController.clearFinished() },
+                            ),
+                            color = MiuixTheme.colorScheme.primary,
+                            style = MiuixTheme.textStyles.body2,
+                        )
                     }
                 }
             }
@@ -226,33 +247,50 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
                             }
                             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                                 Text("${op.platform} · ${op.accountMasked}", fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface)
-                                Text(
-                                    operationSummaryText(op.status, op.completed, op.total, op.detail),
-                                    style = MiuixTheme.textStyles.body2,
-                                    color = when (op.status) {
-                                        OperationStatus.RUNNING -> MiuixTheme.colorScheme.primary
-                                        OperationStatus.FAILED  -> MiuixTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                                        else                    -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                                    },
-                                )
                                 val hasQuestionHistory = questionHistoryOpIds.contains(op.id)
-                                if (op.status == OperationStatus.RUNNING || hasQuestionHistory) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                val showActions = op.status == OperationStatus.RUNNING || hasQuestionHistory
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        operationSummaryText(op.status, op.completed, op.total, op.detail),
+                                        modifier = Modifier.weight(1f),
+                                        style = MiuixTheme.textStyles.body2,
+                                        color = when (op.status) {
+                                            OperationStatus.RUNNING -> MiuixTheme.colorScheme.primary
+                                            OperationStatus.FAILED  -> MiuixTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                                            else                    -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                                        },
+                                    )
+                                    if (showActions) {
                                         if (hasQuestionHistory) {
-                                            TextButton(
-                                                text = "题目历史",
-                                                onClick = { nav.push(Route.QuestionHistory(op.id)) },
+                                            Text(
+                                                "题目历史",
+                                                modifier = Modifier.padding(start = 12.dp).clickable(
+                                                    interactionSource = remember { MutableInteractionSource() },
+                                                    indication = null,
+                                                    onClick = { nav.push(Route.QuestionHistory(op.id)) },
+                                                ),
+                                                color = MiuixTheme.colorScheme.primary,
+                                                style = MiuixTheme.textStyles.body2,
                                             )
                                         }
                                         if (op.status == OperationStatus.RUNNING) {
-                                        TextButton(
-                                            text = "取消",
-                                            onClick = {
-                                                container.operationController.cancel(op.id)
-                                                container.cancelPendingTaskChallenge()
-                                                container.cancelPendingAnswerEdit()
-                                            },
-                                        )
+                                            Text(
+                                                "取消",
+                                                modifier = Modifier.padding(start = 12.dp).clickable(
+                                                    interactionSource = remember { MutableInteractionSource() },
+                                                    indication = null,
+                                                    onClick = {
+                                                        container.operationController.cancel(op.id)
+                                                        container.cancelPendingTaskChallenge()
+                                                        container.cancelPendingAnswerEdit()
+                                                    },
+                                                ),
+                                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                                style = MiuixTheme.textStyles.body2,
+                                            )
                                         }
                                     }
                                 }
