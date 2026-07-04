@@ -108,6 +108,8 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     // • On subsequent refreshes → only scroll if user was already at the top.
     LaunchedEffect(isActive) {
         if (!isActive) return@LaunchedEffect
+        // Wait for tab-switch animation to complete before first refresh to avoid jank.
+        delay(300)
         var firstRun = true
         while (true) {
             val shouldScroll = firstRun || isAtTop

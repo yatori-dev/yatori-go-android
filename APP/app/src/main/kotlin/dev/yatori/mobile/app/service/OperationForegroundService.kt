@@ -130,8 +130,24 @@ class OperationForegroundService : Service() {
 
     private fun opDisplayTitle(op: Operation): String {
         val platformName = platformDisplayName(op.platform, fallback = op.platform)
-        return if (op.accountMasked.isNotBlank()) "$platformName（${op.accountMasked}）"
-        else platformName
+        val config = runCatching { container.repository.loadSavedConfig() }.getOrNull()
+        val remark = config?.users
+            ?.firstOrNull { u ->
+                u.get("account")?.asString == op.account &&
+                    u.get("accountType")?.asString.orEmpty().equals(op.platform, ignoreCase = true)
+            }
+            ?.get("remarkName")?.asString.orEmpty()
+        val accountPart = accountSemiHidden(op.account)
+        return if (remark.isNotBlank()) "$remark（$accountPart）"
+        else "$platformName（$accountPart）"
+    }
+
+    private fun accountSemiHidden(account: String): String {
+        val at = account.indexOf('@')
+        val local = if (at > 0) account.substring(0, at) else account
+        val domain = if (at > 0) account.substring(at) else ""
+        return if (local.length <= 6) local + domain
+        else local.take(4) + "..." + local.takeLast(2) + domain
     }
 
     private fun buildFinishedNotification(title: String, detail: String, failed: Boolean): Notification {

@@ -13,6 +13,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Collections
 
 interface CourseTaskRunner {
@@ -143,21 +144,41 @@ class CourseSyncManager(
             }
             controller.updateProgress(opId, completed = 0, total = pending.size, detail = "共 ${pending.size} 个任务")
 
-            for ((index, p) in pending.withIndex()) {
-                if (controller.isCancelling(opId)) {
-                    emit(SyncEvent("warn", "已收到取消请求，停止运行", plan.platform))
-                    break
+            // For yinghua, run a background keepAlive ticker (every 4 min) while tasks execute.
+            // Without this the server session expires after ~5 min and returns "账号登录超时".
+            coroutineScope {
+                val keepAliveJob = if (session.platform == "yinghua") launch {
+                    delay(4 * 60_000L)
+                    while (!controller.isCancelling(opId)) {
+                        runCatching {
+                            val kaTask = TaskItem(
+                                id = "keepAlive", type = "keepAlive", name = "keepAlive",
+                                platform = "yinghua", raw = session.extra.deepCopy(),
+                            )
+                            platformRunner?.runTask(session, kaTask, PlatformTaskRunOptions(), { false }, {})
+                        }
+                        delay(4 * 60_000L)
+                    }
+                } else null
+
+                for ((index, p) in pending.withIndex()) {
+                    if (controller.isCancelling(opId)) {
+                        emit(SyncEvent("warn", "已收到取消请求，停止运行", plan.platform))
+                        break
+                    }
+                    controller.updateProgress(opId, completed = index, total = pending.size, detail = p.task.name.ifBlank { p.task.id })
+                    runCatching { runOneTask(session, p.task, plan, opId, emit) }
+                        .onSuccess { r ->
+                            submitted.add(p.task.id)
+                            emit(SyncEvent("info", "${p.course.name}／${p.task.name}：${r.status}", plan.platform))
+                        }
+                        .onFailure { e ->
+                            emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
+                        }
+                    controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
                 }
-                controller.updateProgress(opId, completed = index, total = pending.size, detail = p.task.name.ifBlank { p.task.id })
-                runCatching { runOneTask(session, p.task, plan, opId, emit) }
-                    .onSuccess { r ->
-                        submitted.add(p.task.id)
-                        emit(SyncEvent("info", "${p.course.name}／${p.task.name}：${r.status}", plan.platform))
-                    }
-                    .onFailure { e ->
-                        emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
-                    }
-                controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
+
+                keepAliveJob?.cancel()
             }
 
             if (!controller.isCancelling(opId) && session.platform == "xuexitong" && plan.answerPolicy.enabled) {

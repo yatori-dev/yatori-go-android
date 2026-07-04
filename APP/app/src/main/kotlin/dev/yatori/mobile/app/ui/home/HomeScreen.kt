@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.yatori.mobile.app.di.AppContainer
+import dev.yatori.mobile.app.platform.platformDisplayName
 import dev.yatori.mobile.app.ui.common.LogListItem
 import dev.yatori.mobile.app.ui.common.SectionLabel
 import dev.yatori.mobile.app.ui.common.TopBarAction
@@ -246,7 +247,7 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
                                 )
                             }
                             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                Text("${op.platform} · ${op.accountMasked}", fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface)
+                                Text(operationDisplayTitle(op, logConfig), fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface)
                                 val hasQuestionHistory = questionHistoryOpIds.contains(op.id)
                                 val showActions = op.status == OperationStatus.RUNNING || hasQuestionHistory
                                 Row(
@@ -416,4 +417,31 @@ private fun statusCardColor(core: CoreUiState, dark: Boolean): Color = when (cor
     is CoreUiState.Ready -> if (dark) Color(0xFF1A3825) else Color(0xFFDFF3E4)
     is CoreUiState.Error -> if (dark) Color(0xFF3A1E1E) else Color(0xFFFBE3E3)
     else -> if (dark) Color(0xFF3A2E1A) else Color(0xFFFFF1DD)
+}
+
+private fun accountSemiHidden(account: String): String {
+    val at = account.indexOf('@')
+    val local = if (at > 0) account.substring(0, at) else account
+    val domain = if (at > 0) account.substring(at) else ""
+    return if (local.length <= 6) local + domain
+    else local.take(4) + "..." + local.takeLast(2) + domain
+}
+
+private fun operationDisplayTitle(
+    op: dev.yatori.mobile.runtime.operation.Operation,
+    config: dev.yatori.mobile.api.dto.MobileConfig?,
+): String {
+    val platformName = platformDisplayName(op.platform, fallback = op.platform)
+    val remark = config?.users
+        ?.firstOrNull { u ->
+            u.asJsonObject?.get("account")?.asString == op.account &&
+                u.asJsonObject?.get("accountType")?.asString.orEmpty().equals(op.platform, ignoreCase = true)
+        }
+        ?.asJsonObject?.get("remarkName")?.asString.orEmpty()
+    val accountPart = if (remark.isNotBlank()) {
+        "$remark（${accountSemiHidden(op.account)}）"
+    } else {
+        op.account
+    }
+    return "$platformName · $accountPart"
 }

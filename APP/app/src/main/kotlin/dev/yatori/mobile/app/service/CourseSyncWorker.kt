@@ -83,29 +83,45 @@ class CourseSyncWorker(
         )
 
         var lastEventWasError = false
-        return runCatching {
-            val submitted = container.courseSyncManager.run(session, plan) { event ->
-                lastEventWasError = event.level.equals("error", ignoreCase = true)
-                appendRunEvent(container, event)
+        var currentSession = session
+
+        // Run with at most one auto-relogin retry on session expiry.
+        for (attempt in 0..1) {
+            val syncResult = runCatching {
+                container.courseSyncManager.run(currentSession, plan) { event ->
+                    lastEventWasError = event.level.equals("error", ignoreCase = true)
+                    appendRunEvent(container, event)
+                }
             }
-            // Notify per-user email list on successful completion, mirroring console userBlock().
-            sendCompletionEmailIfConfigured(container, platform, account)
-            Result.success(workDataOf(KEY_SUBMITTED to submitted.toTypedArray()))
-        }.getOrElse {
+
+            if (syncResult.isSuccess) {
+                sendCompletionEmailIfConfigured(container, platform, account)
+                return Result.success(workDataOf(KEY_SUBMITTED to syncResult.getOrThrow().toTypedArray()))
+            }
+
+            val error = syncResult.exceptionOrNull()!!
+            // On first attempt, check for session expiry and try auto-relogin.
+            if (attempt == 0 && isSessionExpiredError(error)) {
+                appendRunEvent(container, SyncEvent(level = "warn", message = "会话已过期，尝试自动重新登录…", platform = platform, account = account))
+                val newSession = autoReloginWithOcr(container, platform, account, url)
+                if (newSession != null) {
+                    currentSession = newSession
+                    lastEventWasError = false
+                    appendRunEvent(container, SyncEvent(level = "info", message = "重新登录成功，继续执行任务", platform = platform, account = account))
+                    continue
+                }
+                appendRunEvent(container, SyncEvent(level = "error", message = "自动重新登录失败，请手动登录后重试", platform = platform, account = account))
+                return Result.failure()
+            }
+
+            // Normal error path.
             if (!lastEventWasError) {
-                appendRunEvent(
-                    container,
-                    SyncEvent(
-                        level = "error",
-                        message = "RunTask failed: ${it.message ?: it::class.java.simpleName}",
-                        platform = platform,
-                        account = account,
-                    ),
-                )
+                appendRunEvent(container, SyncEvent(level = "error", message = "任务执行失败：${error.message ?: error::class.java.simpleName}", platform = platform, account = account))
             }
-            // allow WorkManager to retry across restarts
-            Result.retry()
+            return Result.retry()
         }
+
+        return Result.retry()
     }
 
     companion object {
@@ -202,6 +218,38 @@ private suspend fun tryRefreshSession(
             }
         }
     }.getOrNull()  // any network/parse error → fall back to existing session
+}
+
+private fun isSessionExpiredError(error: Throwable): Boolean {
+    val msg = (error.message ?: "").lowercase()
+    return "超时" in msg || "重新登录" in msg || "login" in msg || "expired" in msg ||
+        "session" in msg || "unauthorized" in msg || "登录" in msg
+}
+
+private suspend fun autoReloginWithOcr(
+    container: dev.yatori.mobile.app.di.AppContainer,
+    platform: String,
+    account: String,
+    url: String,
+): dev.yatori.mobile.api.dto.SessionData? {
+    val platformEnum = dev.yatori.mobile.api.Platform.entries.firstOrNull {
+        it.id.equals(platform, ignoreCase = true)
+    } ?: return null
+    val credential = container.repository.getCredential(platform, account) ?: return null
+
+    val outcome = container.loginController.login(
+        platform = platformEnum,
+        account = credential,
+        progress = { _, _ -> },
+    )
+
+    if (outcome !is dev.yatori.mobile.app.ui.courses.LoginOutcome.Success) return null
+
+    // Return the freshly saved session (URL fallback mirrors doWork session lookup).
+    return container.repository.getSession(platform, account, url)
+        ?: container.repository.listSessions()
+            .firstOrNull { it.platform == platform && it.account == account }
+            ?.session
 }
 
 private fun appendRunEvent(container: AppContainer, event: SyncEvent) {
