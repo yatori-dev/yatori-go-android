@@ -1,0 +1,34 @@
+# Go / gomobile build outputs
+.cache/
+build/
+tmp-aar/
+dist/
+*.log
+
+# Local helper scripts
+build-release.bat
+clean-generated.bat
+scripts/
+
+# Local planning/reference docs
+docs/
+APP/docs/
+
+# Android / Gradle build outputs
+APP/.gradle/
+APP/.kotlin/
+APP/**/build/
+APP/local.properties
+APP/mobilecore-api/libs/*.aar
+
+# Signing material must stay local
+*.keystore
+*.jks
+keystore.properties
+signing.properties
+
+# IDE / OS noise
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

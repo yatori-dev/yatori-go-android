@@ -1,0 +1,608 @@
+package cqie
+
+import (
+	"crypto/tls"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/yatori-dev/yatori-go-mobile-core/utils"
+)
+
+// UserDetailsApi 获取用户信息
+func (cache *CqieUserCache) UserDetailsApi(retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/sysUser/nowUserDetails"
+	method := "GET"
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, nil)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.UserDetailsApi(retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+	req.Header.Add("Accept", "*/*")
+	req.Header.Add("Host", "study.cqie.edu.cn")
+	req.Header.Add("Connection", "keep-alive")
+	req.Header.Add("Cookie", cache.cookie)
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.UserDetailsApi(retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.UserDetailsApi(retry-1, err)
+	}
+	return string(body), nil
+}
+
+// PullCourseListApi 拉取课程列表
+func (cache *CqieUserCache) PullCourseListApi(retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/pagedMyCourse"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+   "filters": {
+	 "courseNature": "",
+	 "name": "",
+	 "schoolYear": "",
+	 "studentId": "` + cache.studentId + `",
+	 "term": "",
+	 "majorId": "` + cache.orgMajorId + `"
+   },
+   "pageIndex": 1,
+   "pageSize": 200
+ }`)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Accept", "*/*")
+	req.Header.Add("Host", "study.cqie.edu.cn")
+	req.Header.Add("Connection", "keep-alive")
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	return string(body), nil
+}
+
+func (cache *CqieUserCache) PullCourseListApiNew(retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	//url := "https://study.cqie.edu.cn/gateway/system/orgStudent/pagedMyCourse"
+	urlStr := "https://study.cqie.edu.cn/gateway/frequent/orgStudent/pagedMyCourse"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+   "filters": {
+	 "courseNature": "",
+	 "name": "",
+	 "schoolYear": "",
+	 "studentId": "` + cache.studentId + `",
+	 "term": "",
+	 "majorId": "` + cache.orgMajorId + `"
+   },
+   "pageIndex": 1,
+   "pageSize": 200
+ }`)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", "Apifox/1.0.0 (https://apifox.com)")
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Accept", "*/*")
+	req.Header.Add("Host", "study.cqie.edu.cn")
+	req.Header.Add("Connection", "keep-alive")
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseListApi(retry-1, err)
+	}
+	return string(body), nil
+}
+
+// GetVideoStudyIdApi 学习视屏前需要先调用此接口获取id才能学习
+func (cache *CqieUserCache) GetVideoStudyIdApi(studentCourseId, videoId, version string, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/studyVideo?studentCourseId=" + studentCourseId + "&videoId=" + videoId + "&studentId=" + cache.studentId + "&majorId=" + cache.orgMajorId + "&version=" + version
+	method := "GET"
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, nil)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.GetVideoStudyIdApi(studentCourseId, videoId, version, retry-1, lastErr)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.GetVideoStudyIdApi(studentCourseId, videoId, version, retry-1, lastErr)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.GetVideoStudyIdApi(studentCourseId, videoId, version, retry-1, lastErr)
+	}
+	return string(body), nil
+}
+
+// SubmitStudyTimeApi 提交学时
+func (cache *CqieUserCache) SubmitStudyTimeApi(
+	id string, //不知道是啥
+	version string,
+	courseId string,
+	studentCourseId string,
+	unitId string,
+	videoId string,
+	studyTime time.Time, /**/
+	coursewareId string,
+	startPos int, /*开始点*/
+	stopPos int, /*结束点*/
+	maxPos int, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/updateStudyVideoPlan"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+		"id": "` + id + `",
+	   "orgId": "` + cache.orgId + `",
+	   "deptId": "` + cache.deptId + `",
+	   "majorId": "` + cache.orgMajorId + `",
+	   "version": "` + version + `",
+	   "courseId": "` + courseId + `",
+	   "studentCourseId": "` + studentCourseId + `",
+	   "unitId": "` + unitId + `",
+	   "knowledgeId": null,
+	   "videoId": "` + videoId + `",
+	   "studentId": "` + cache.userId + `",
+	   "studyTime": "` + studyTime.Format("2006-01-02 15:04:05") + `",
+	   "startPos":` + strconv.Itoa(startPos) + `,
+	   "stopPos": ` + strconv.Itoa(stopPos) + `,
+	   "createTime": "` + studyTime.Format("2006-01-02 15:04:05") + `",
+	   "maxCurrentPos": ` + strconv.Itoa(maxPos) + `,
+	   "coursewareId": "` + coursewareId + `",
+       "segmentKnowledgeId": null
+	 }`)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.GetAccess_Token())
+	req.Header.Add("Cookie", cache.GetCookie())
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+	}
+	return string(body), nil
+}
+
+// 用于保存学习点时间
+func (cache *CqieUserCache) SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version string, startPos, stopPos int, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/saveStudyVideoPlan"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+		"courseId": "` + courseId + `",
+		"majorId": "` + cache.orgMajorId + `",
+		"startPos": "` + strconv.Itoa(startPos) + `",
+		"stopPos": "` + strconv.Itoa(stopPos) + `",
+		"studentCourseId": "` + studentCourseId + `",
+		"studentId": "` + cache.studentId + `",
+		"unitId": "` + unitId + `",
+		"videoId": "` + videoId + `",
+		"coursewareId": "` + coursewareId + `",
+		"version": "` + version + `"
+	}`)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	return string(body), nil
+}
+
+// 用于保存学习点时间
+func (cache *CqieUserCache) SaveSegmentStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version string, startPos, stopPos int, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/segment/saveStudyVideoPlan"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+	"id": "",
+    "orgId":"1",
+	"deptId":"` + cache.deptId + `",
+	"majorId": "` + cache.orgMajorId + `",	
+	"courseId": "` + courseId + `",
+	"startPos": "` + strconv.Itoa(startPos) + `",
+	"stopPos": "` + strconv.Itoa(stopPos) + `",
+	"studentCourseId": "` + studentCourseId + `",
+	"studentId": "` + cache.studentId + `",
+	"unitId": "` + unitId + `",
+	"videoId": "` + videoId + `",
+	"knowledgeId": null,
+	"segmentKnowledgeId": "` + segmentKnowledgeId + `",
+	"maxCurrentPos": ` + maxCurrentPos + `,
+	"version": "` + version + `"
+}`)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+	}
+	return string(body), nil
+}
+
+// PullCourseDetailApi 拉取对应课程详细信息，一般用于获取对应视屏列表的
+func (cache *CqieUserCache) PullCourseDetailApi(courseId, studentCourseId, version string, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/myCourseDetails?studentId=" + cache.studentId + "&id=" + courseId + "&majorId=" + cache.orgMajorId + "&studentCourseId=" + studentCourseId + "&version=" + version
+	method := "GET"
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, nil)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullCourseDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	return string(body), nil
+}
+
+// PullProgressDetailApi 拉取进度
+func (cache *CqieUserCache) PullProgressDetailApi(courseId, studentCourseId, version string, retry int, lastErr error) (string, error) {
+	if retry < 0 {
+		return "", lastErr
+	}
+	urlStr := "https://study.cqie.edu.cn/gateway/system/orgStudent/progressDetails?studentId=" + cache.studentId + "&id=" + courseId + "&majorId=" + cache.orgMajorId + "&studentCourseId=" + studentCourseId + "&version=" + version
+	method := "GET"
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, nil)
+
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullProgressDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	req.Header.Add("Authorization", cache.access_token)
+	req.Header.Add("User-Agent", utils.DefaultUserAgent)
+
+	res, err := client.Do(req)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullProgressDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		time.Sleep(time.Millisecond * 150)
+		return cache.PullProgressDetailApi(courseId, studentCourseId, version, retry-1, lastErr)
+	}
+	return string(body), nil
+}
+
+// 拉取视屏作业试卷接口
+func (cache *CqieUserCache) PullVideoWorkPaperApi(knowledgeNodeId, studentCourseId, unitId string) (string, error) {
+
+	urlStr := "https://study.cqie.edu.cn/gateway/study/studyKnowledgeExerciseRecord/exercisesList"
+	method := "POST"
+
+	payload := strings.NewReader(`{
+		"knowledgeNodeId": "` + knowledgeNodeId + `",
+		"studentCourseId": "` + studentCourseId + `",
+		"unitId": "` + unitId + `"
+		}`)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	req.Header.Add("accept", "application/json, text/plain, */*")
+	req.Header.Add("accept-language", "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6")
+	req.Header.Add("authorization", cache.access_token)
+	req.Header.Add("cache-control", "no-cache")
+	req.Header.Add("origin", "https://study.cqie.edu.cn")
+	req.Header.Add("pragma", "no-cache")
+	req.Header.Add("priority", "u=1, i")
+
+	req.Header.Add("sec-ch-ua", "\"Chromium\";v=\"142\", \"Microsoft Edge\";v=\"142\", \"Not_A Brand\";v=\"99\"")
+	req.Header.Add("sec-ch-ua-mobile", "?0")
+	req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
+	req.Header.Add("sec-fetch-dest", "empty")
+	req.Header.Add("sec-fetch-mode", "cors")
+	req.Header.Add("sec-fetch-site", "same-origin")
+	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0")
+	req.Header.Add("content-type", "application/json;charset=UTF-8;")
+	req.Header.Add("Host", "study.cqie.edu.cn")
+	req.Header.Add("Connection", "keep-alive")
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	//fmt.Println(string(body))
+	return string(body), nil
+}
+
+// 提交答案
+func (cache *CqieUserCache) SubmitWorkAnswerApi(answerJson string) (string, error) {
+
+	urlStr := "https://study.cqie.edu.cn/gateway/study/studyKnowledgeExerciseSummaryRecord/createList"
+	method := "POST"
+
+	payload := strings.NewReader(answerJson)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+	}
+	req, err := http.NewRequest(method, urlStr, payload)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	req.Header.Add("accept", "application/json, text/plain, */*")
+	req.Header.Add("accept-language", "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6")
+	req.Header.Add("authorization", cache.access_token)
+	req.Header.Add("cache-control", "no-cache")
+	req.Header.Add("origin", "https://study.cqie.edu.cn")
+	req.Header.Add("pragma", "no-cache")
+	req.Header.Add("priority", "u=1, i")
+
+	req.Header.Add("sec-ch-ua", "\"Chromium\";v=\"142\", \"Microsoft Edge\";v=\"142\", \"Not_A Brand\";v=\"99\"")
+	req.Header.Add("sec-ch-ua-mobile", "?0")
+	req.Header.Add("sec-ch-ua-platform", "\"Windows\"")
+	req.Header.Add("sec-fetch-dest", "empty")
+	req.Header.Add("sec-fetch-mode", "cors")
+	req.Header.Add("sec-fetch-site", "same-origin")
+	req.Header.Add("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0")
+
+	req.Header.Add("content-type", "application/json;charset=UTF-8;")
+	req.Header.Add("Host", "study.cqie.edu.cn")
+	req.Header.Add("Connection", "keep-alive")
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	//fmt.Println(string(body))
+	return string(body), nil
+}

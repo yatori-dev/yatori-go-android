@@ -1,0 +1,47 @@
+package mobilecore
+
+// configSchema returns a field-by-field description for Android UI consumption.
+func configSchema() interface{} {
+	return map[string]interface{}{
+		"version": "2",
+		"fields": []map[string]interface{}{
+			{"path": "setting.basicSetting.completionTone", "type": "int", "description": "Completion sound: 0=off, 1=on."},
+			{"path": "setting.basicSetting.colorLog", "type": "int", "description": "Colored log output: 0=off, 1=on."},
+			{"path": "setting.basicSetting.logOutFileSw", "type": "int", "description": "Write log files: 0=off, 1=on."},
+			{"path": "setting.basicSetting.logLevel", "type": "string", "description": "Log level: debug/info/warn/error."},
+			{"path": "setting.basicSetting.logModel", "type": "int", "description": "Log grouping: 0=task/video, 1=course."},
+			{"path": "setting.emailInform.sw", "type": "int", "description": "Email notification: 0=off, 1=on."},
+			{"path": "setting.emailInform.smtpHost", "type": "string", "description": "SMTP host."},
+			{"path": "setting.emailInform.smtpPort", "type": "string", "description": "SMTP port."},
+			{"path": "setting.emailInform.email", "type": "string", "description": "Sender email address."},
+			{"path": "setting.emailInform.password", "type": "string", "description": "Email password or authorization code."},
+			{"path": "setting.aiSetting.aiType", "type": "string", "description": "AI type: CHATGLM/XINGHUO/TONGYI/DOUBAO/OPENAI/DEEPSEEK/METAAI/SILICON/OTHER."},
+			{"path": "setting.aiSetting.aiUrl", "type": "string", "description": "AI API base URL."},
+			{"path": "setting.aiSetting.model", "type": "string", "description": "AI model name."},
+			{"path": "setting.aiSetting.API_KEY", "type": "string", "description": "AI API key."},
+			{"path": "setting.apiQueSetting.url", "type": "string", "description": "Custom question-bank API URL. The original protocol posts {md5,type,content,options,answers} and expects answers in the response."},
+			{"path": "setting.apiQueSetting.exType", "type": "string", "description": "External question-bank type: CUSTOM/YANXI/MAX/ZDS."},
+			{"path": "setting.apiQueSetting.exToken", "type": "string", "description": "External question-bank token for YANXI/MAX/ZDS."},
+			{"path": "users[].accountType", "type": "string", "description": "Platform id: xuexitong/icve/weiban/haiqikeji/enaea/ketangx/qingshuxuetang/ttcdw/welearn/yinghua/cqie/mooc/gongxue/cela."},
+			{"path": "users[].url", "type": "string", "description": "Platform URL; required by yinghua and haiqikeji."},
+			{"path": "users[].remarkName", "type": "string", "description": "Optional display alias for the account."},
+			{"path": "users[].account", "type": "string", "description": "Login account."},
+			{"path": "users[].password", "type": "string", "description": "Login password or cookie payload where a platform supports cookie login."},
+			{"path": "users[].informEmails", "type": "[]string", "description": "Completion notification recipient emails for this account."},
+			{"path": "users[].coursesCustom.studyTime", "type": "string", "description": "WeLearn time mode range, e.g. 20-30 minutes."},
+			{"path": "users[].coursesCustom.cxNode", "type": "int", "description": "Xuexitong multi-task concurrency; 0=default, -1=unlimited."},
+			{"path": "users[].coursesCustom.cxChapterTestSw", "type": "int", "description": "Xuexitong chapter-test switch: 0=off, 1=on."},
+			{"path": "users[].coursesCustom.cxWorkSw", "type": "int", "description": "Xuexitong course work switch: 0=off, 1=on."},
+			{"path": "users[].coursesCustom.cxExamSw", "type": "int", "description": "Xuexitong course exam switch: 0=off, 1=on."},
+			{"path": "users[].coursesCustom.shuffleSw", "type": "int", "description": "Xuexitong shuffled chapter order: 0=off, 1=on."},
+			{"path": "users[].coursesCustom.videoModel", "type": "int", "description": "Video/content learning mode. Valid values are platform-specific and should be rendered from Android's platform matrix."},
+			{"path": "users[].coursesCustom.autoExam", "type": "int", "description": "Answer mode. Valid values are platform-specific: 0=off, 1=host AI, 2=external question bank, 3=xuexitong built-in AI."},
+			{"path": "users[].coursesCustom.examAutoSubmit", "type": "int", "description": "Final submit policy for supported work/exam flows. Exams/chapter-tests still require explicit host authorization."},
+			{"path": "users[].coursesCustom.excludeCourses", "type": "[]string", "description": "Course names to exclude."},
+			{"path": "users[].coursesCustom.includeCourses", "type": "[]string", "description": "Course names to include; empty means all."},
+			{"path": "users[].coursesCustom.coursesSettings[].name", "type": "string", "description": "Course-specific rule course name."},
+			{"path": "users[].coursesCustom.coursesSettings[].includeExams", "type": "[]string", "description": "Course-specific exam include list."},
+			{"path": "users[].coursesCustom.coursesSettings[].excludeExams", "type": "[]string", "description": "Course-specific exam exclude list."},
+		},
+	}
+}
