@@ -7,9 +7,13 @@ import dev.yatori.mobile.api.dto.localReadableLine
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.File
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** Metadata for one historical log session file. */
 data class LogFileMeta(
@@ -50,23 +54,87 @@ class EncryptedLogStore(
         "yatori_${FILE_TS.format(Date(sessionStartMillis))}$EXT"
     private val sessionFile: File get() = File(dir, sessionFileName)
 
+    // ── live in-memory buffer (display source of truth) ──────────────────────────
+    //
+    // The UI reads logs from this bounded, newest-last list — NEVER by decrypting the whole
+    // file on a timer. Every append (Go-core poll OR runtime event) funnels through
+    // [appendEntries], so the buffer always reflects the current session. The encrypted file
+    // remains the durable/export copy.
+
+    private val liveState = MutableStateFlow<List<LogEntry>>(emptyList())
+    /** Bounded (≤[LIVE_CAP]) current-session log list, append order, pushed on every write. */
+    val live: StateFlow<List<LogEntry>> = liveState.asStateFlow()
+
+    private var seeded = false
+    /** Approx. number of frames currently on disk for this session (for compaction). */
+    private var diskFrameCount = 0
+
     // ── append ──────────────────────────────────────────────────────────────────
 
     /** Appends Go-core / Android log entries to the current session, unchanged and in order. */
     @Synchronized
     fun appendEntries(entries: List<LogEntry>) {
         if (entries.isEmpty()) return
+        seedIfNeeded()
         dir.mkdirs()
         java.io.FileOutputStream(sessionFile, /* append = */ true).buffered().use { out ->
-            for (entry in entries) {
-                val (iv, ciphertext) = crypto.encrypt(gson.toJson(entry).toByteArray(Charsets.UTF_8))
-                out.write(intToBytes(ciphertext.size))
-                out.write(iv.size)
-                out.write(iv)
-                out.write(ciphertext)
+            for (entry in entries) writeFrame(out, entry)
+        }
+        diskFrameCount += entries.size
+        val merged = liveState.value + entries
+        liveState.value = if (merged.size > LIVE_CAP) merged.takeLast(LIVE_CAP) else merged
+        if (diskFrameCount > FILE_COMPACT_THRESHOLD) compactCurrentSession()
+    }
+
+    private fun writeFrame(out: OutputStream, entry: LogEntry) {
+        val (iv, ciphertext) = crypto.encrypt(gson.toJson(entry).toByteArray(Charsets.UTF_8))
+        out.write(intToBytes(ciphertext.size))
+        out.write(iv.size)
+        out.write(iv)
+        out.write(ciphertext)
+    }
+
+    /**
+     * Populates the live buffer from the on-disk session once (lazily). Full-file decrypt, but
+     * paid a single time per process — not on every UI refresh. Safe to call repeatedly.
+     */
+    @Synchronized
+    fun seedIfNeeded() {
+        if (seeded) return
+        seeded = true
+        val all = readFile(sessionFile)
+        diskFrameCount = all.size
+        liveState.value = if (all.size > LIVE_CAP) all.takeLast(LIVE_CAP) else all
+    }
+
+    /**
+     * Caps the current-session file: rewrites it to contain only the live buffer (newest
+     * ≤[LIVE_CAP]). Called when the file crosses [FILE_COMPACT_THRESHOLD] frames, so the session
+     * file never grows without bound. Trade-off: current-session export is limited to the newest
+     * frames kept after the last compaction.
+     */
+    @Synchronized
+    private fun compactCurrentSession() {
+        val snapshot = liveState.value
+        if (snapshot.isEmpty()) return
+        dir.mkdirs()
+        val tmp = File(dir, "$sessionFileName.compact.tmp")
+        try {
+            java.io.FileOutputStream(tmp).buffered().use { out ->
+                for (entry in snapshot) writeFrame(out, entry)
             }
+            if (tmp.renameTo(sessionFile)) {
+                diskFrameCount = snapshot.size
+            } else if (sessionFile.delete() && tmp.renameTo(sessionFile)) {
+                diskFrameCount = snapshot.size
+            } else {
+                tmp.delete()
+            }
+        } catch (_: Exception) {
+            tmp.delete()
         }
     }
+
 
     // ── read ─────────────────────────────────────────────────────────────────────
 
@@ -117,7 +185,12 @@ class EncryptedLogStore(
 
     /** Clears the current session file. */
     @Synchronized
-    fun clearCurrentSession() { sessionFile.delete() }
+    fun clearCurrentSession() {
+        sessionFile.delete()
+        liveState.value = emptyList()
+        diskFrameCount = 0
+        seeded = true
+    }
 
     fun deleteHistory(name: String): Boolean {
         val f = File(dir, name)
@@ -168,6 +241,13 @@ class EncryptedLogStore(
     companion object {
         const val EXT = ".jsonl.enc"
         const val DEFAULT_RETENTION = 30
+
+        /** Max entries kept in the live in-memory buffer (and thus shown in the UI). */
+        const val LIVE_CAP = 2000
+
+        /** When the session file exceeds this many frames, it is compacted down to [LIVE_CAP]. */
+        const val FILE_COMPACT_THRESHOLD = 6000
+
         private val FILE_TS = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
     }
 }

@@ -20,7 +20,9 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,10 +50,8 @@ import dev.yatori.mobile.app.ui.nav.Navigator
 import dev.yatori.mobile.app.ui.nav.Route
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.localFullTime
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Text
@@ -72,7 +72,9 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior()
 
-    var all by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val live by container.liveLogs.collectAsState()
+    // Newest-first for display; the live buffer is already bounded to LIVE_CAP.
+    val all = remember(live) { live.asReversed().distinctBy { it.id } }
     var query by remember { mutableStateOf("") }
     var levelFilter by remember { mutableStateOf<String?>(null) } // null = all
     var detail by remember { mutableStateOf<LogEntry?>(null) }
@@ -103,30 +105,21 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     // True when the user is at (or very near) the top — used to decide auto-scroll on refresh.
     val isAtTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 80 } }
 
-    // While the log tab is active: refresh every 3 s.
-    // • On first activation (returning from anywhere) → always scroll to top.
-    // • On subsequent refreshes → only scroll if user was already at the top.
+    // The centralized poller (AppContainer) drains the Go-core buffer; here we only raise the
+    // poll cadence while this tab is visible and observe the pushed [liveLogs] — no per-tick
+    // full-file decrypt.
+    DisposableEffect(isActive) {
+        if (isActive) container.retainLogView()
+        onDispose { if (isActive) container.releaseLogView() }
+    }
+    // Auto-scroll to newest: on first activation, and thereafter only when the user is at top.
     LaunchedEffect(isActive) {
         if (!isActive) return@LaunchedEffect
-        // Wait for tab-switch animation to complete before first refresh to avoid jank.
-        delay(300)
-        var firstRun = true
-        while (true) {
-            val shouldScroll = firstRun || isAtTop
-            val processed = withContext(Dispatchers.IO) {
-                runCatching { repo.pollLogs() }
-                val raw = repo.currentSessionLogs()
-                (if (raw.size > 2000) raw.takeLast(2000) else raw)
-                    .reversed()
-                    .distinctBy { it.id }
-            }
-            all = processed
-            if (shouldScroll && processed.isNotEmpty()) {
-                listState.scrollToItem(0)
-            }
-            firstRun = false
-            delay(3_000)
-        }
+        delay(300) // let the tab-switch animation settle before snapping
+        if (all.isNotEmpty()) listState.scrollToItem(0)
+    }
+    LaunchedEffect(all.firstOrNull()?.id) {
+        if (isActive && isAtTop && all.isNotEmpty()) listState.scrollToItem(0)
     }
 
     // Recompute only when the underlying data or filter criteria change.
@@ -230,7 +223,7 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
             scope.launch {
                 runCatching { repo.clearLogs() }
                 container.logStore.clearCurrentSession()
-                all = emptyList()
+                // clearCurrentSession empties the live buffer → `all` recomposes to empty.
             }
             showClear = false
         },

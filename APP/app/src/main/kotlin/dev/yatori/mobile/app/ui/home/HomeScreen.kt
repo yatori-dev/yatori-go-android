@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -62,9 +63,7 @@ import dev.yatori.mobile.app.ui.nav.Tab
 import dev.yatori.mobile.app.ui.theme.isInDarkTheme
 import dev.yatori.mobile.app.ui.theme.LocalThemeState
 import dev.yatori.mobile.api.dto.HealthInfo
-import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.runtime.operation.OperationStatus
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -89,7 +88,7 @@ private sealed interface CoreUiState {
  * section. Reads only through the repository / operation controller / log store.
  */
 @Composable
-fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.compose.ui.unit.Dp) {
+fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.compose.ui.unit.Dp, isActive: Boolean = false) {
     val repo = container.repository
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -98,7 +97,9 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
     var core by remember { mutableStateOf<CoreUiState>(CoreUiState.Loading) }
     var accountCount by remember { mutableStateOf(0) }
     var courseCount by remember { mutableStateOf(0) }
-    var recent by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
+    val liveLogs by container.liveLogs.collectAsState()
+    // Newest-first, last 5 — pushed from the centralized poller, no disk decrypt here.
+    val recent = remember(liveLogs) { liveLogs.takeLast(5).reversed() }
     val operations by container.operationController.operations.collectAsState()
     val questionHistory by container.operationController.questionHistory.collectAsState()
     val pendingTaskChallenges by container.pendingTaskChallengesFlow.collectAsState()
@@ -111,9 +112,9 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
     val hasFinishedOp = remember(operations) { operations.any { it.status == OperationStatus.DONE || it.status == OperationStatus.FAILED } }
 
     // showToast=true → manual refresh via the top-bar button (gives a "刷新成功" toast).
-    // showToast=false → silent auto-refresh fired when the user returns to the Home tab
-    // (Home leaves composition on tab switch, so LaunchedEffect(Unit) re-runs on return).
-    // While the user stays on Home nothing polls, so there is no background churn.
+    // showToast=false → one-shot silent refresh on first composition. Home stays composed
+    // across tab switches (see YatoriApp), so this runs once per process; the top-bar button
+    // refreshes again on demand. Recent events come from [liveLogs], not from this call.
     fun refresh(showToast: Boolean) {
         scope.launch {
             core = CoreUiState.Loading
@@ -122,8 +123,6 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
                 repo.healthCheck()
             }.onSuccess { health ->
                 core = CoreUiState.Ready(health)
-                runCatching { repo.pollLogs() }
-                recent = repo.currentSessionLogs().takeLast(5).reversed()
                 if (showToast) Toast.makeText(context, "刷新成功", Toast.LENGTH_SHORT).show()
             }.onFailure {
                 core = CoreUiState.Error(it.message ?: "Core 初始化失败")
@@ -136,13 +135,11 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
 
     LaunchedEffect(Unit) { refresh(showToast = false) }
 
-    // Refresh recent events every 10 s while home tab is in composition.
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(10_000L)
-            runCatching { repo.pollLogs() }
-            recent = repo.currentSessionLogs().takeLast(5).reversed()
-        }
+    // Raise the log-poll cadence while Home is the visible tab; the centralized poller in
+    // AppContainer does the actual draining and pushes updates via [liveLogs].
+    DisposableEffect(isActive) {
+        if (isActive) container.retainLogView()
+        onDispose { if (isActive) container.releaseLogView() }
     }
 
     val barBackdrop = rememberBarBackdrop()

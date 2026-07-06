@@ -97,7 +97,7 @@ fun YatoriApp(
 
     val tabContent = remember(container, nav) {
         mapOf<Tab, @Composable (Dp, Boolean) -> Unit>(
-            Tab.HOME     to { bp, _ -> HomeScreen(container, nav, bp) },
+            Tab.HOME     to { bp, active -> HomeScreen(container, nav, bp, active) },
             Tab.COURSES  to { bp, active -> CoursesScreen(container, nav, bp, active) },
             Tab.LOGS     to { bp, active -> LogsScreen(container, nav, bp, active) },
             Tab.SETTINGS to { bp, _ -> SettingsScreen(container, nav, bp) },

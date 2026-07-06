@@ -136,4 +136,25 @@ class EncryptedLogStoreTest {
 
         out.deleteRecursively()
     }
+
+    @Test
+    fun `compaction caps the session file to LIVE_CAP once it crosses the threshold`() {
+        val s = store(1_000L)
+        val total = (EncryptedLogStore.FILE_COMPACT_THRESHOLD + 1).toLong()
+        // Append in batches (mimicking Go-core poll batches) until the frame count crosses
+        // FILE_COMPACT_THRESHOLD, which triggers a rewrite down to the live window.
+        var next = 1L
+        while (next <= total) {
+            val end = minOf(next + 999, total)
+            s.appendEntries((next..end).map { entry(it) })
+            next = end + 1
+        }
+        val read = s.readCurrentSession()
+        // File was rewritten to hold only the newest LIVE_CAP frames.
+        assertEquals(EncryptedLogStore.LIVE_CAP, read.size)
+        assertEquals(total, read.last().id)
+        assertEquals(total - EncryptedLogStore.LIVE_CAP + 1, read.first().id)
+        // The live buffer matches the on-disk compacted window exactly.
+        assertEquals(read.map { it.id }, s.live.value.map { it.id })
+    }
 }

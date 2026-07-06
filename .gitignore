@@ -32,3 +32,6 @@ signing.properties
 *.iml
 .DS_Store
 Thumbs.db
+
+# claude system propmt
+CLAUDE.md
