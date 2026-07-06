@@ -20,6 +20,21 @@ func fakeXxtChapter(raw string, err error) func() {
 	return func() { xxtChapterProvider = orig }
 }
 
+// fakeXxtKnowledgeCards swaps the gas/knowledge cards provider. Pass an error to force
+// getTasks onto the legacy attachment fallback.
+func fakeXxtKnowledgeCards(raw string, err error) func() {
+	orig := xxtKnowledgeCardsProvider
+	xxtKnowledgeCardsProvider = func(_ *xxtmobile.XxtClient, _, _ int) (string, error) { return raw, err }
+	return func() { xxtKnowledgeCardsProvider = orig }
+}
+
+// fakeXxtPointStatus swaps the myjobsnodesmap point-status provider.
+func fakeXxtPointStatus(raw string, err error) func() {
+	orig := xxtPointStatusProvider
+	xxtPointStatusProvider = func(_ *xxtmobile.XxtClient, _ []int, _, _, _, _ int) (string, error) { return raw, err }
+	return func() { xxtPointStatusProvider = orig }
+}
+
 // reuse existing fakeXxtCourseList from platform_xuexitong_test.go
 // (same package, already defined)
 
@@ -118,6 +133,8 @@ func TestGetCourseDetailXuexitong_PreservesMixedAttachmentTypes(t *testing.T) {
 	Init("/tmp/test")
 	restore := fakeXxtChapter(xxtFakeChapterMixedAttachments, nil)
 	defer restore()
+	// Force the attachment fallback so this test exercises mixed-type attachment parsing.
+	defer fakeXxtKnowledgeCards("", errors.New("cards disabled in test"))()
 
 	e := parseEnvelope(t, GetCourseDetail(xxtSessJSON, xxtCourseJSON))
 	if !e.OK {
@@ -242,6 +259,7 @@ func TestGetCourseDetailXuexitong_ProviderError(t *testing.T) {
 func TestGetTasksXuexitong_FromAttachments(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
+	defer fakeXxtKnowledgeCards("", errors.New("cards disabled in test"))()
 	// courseJSON from GetCourseDetail Item[0] — has attachments in Raw
 	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"attachments":[{"id":"att1","type":"video","objectid":"obj1"}]}}`
 	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
@@ -268,6 +286,7 @@ func TestGetTasksXuexitong_FromAttachments(t *testing.T) {
 func TestGetTasksXuexitong_AttachmentIDFallbackForNonVideoTasks(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
+	defer fakeXxtKnowledgeCards("", errors.New("cards disabled in test"))()
 	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"attachments":[{"id":"bbs-att","type":"insertbbs","objectid":""},{"id":"live-att","type":"insertlive"}]}}`
 	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
 	if !e.OK {
@@ -309,6 +328,144 @@ func TestGetTasksXuexitong_MissingRequiredFields(t *testing.T) {
 	e := parseEnvelope(t, GetTasks(xxtSessJSON, `{"platform":"xuexitong","id":"111","raw":{"classId":"2001"}}`))
 	if e.OK {
 		t.Fatal("missing courseId+cpi should fail")
+	}
+}
+
+// --- GetTasks: card-based discovery (gas/knowledge → iframe task points) ---
+
+// One card with a video iframe, one card with a work (chapter-test) iframe.
+const xxtFakeKnowledgeCards = `{"data":[{"card":{"data":[{"cardorder":0,"knowledgeid":111,"description":"<iframe module=\"insertvideo\" data=\"{&quot;objectid&quot;:&quot;obj-vid&quot;,&quot;jobid&quot;:&quot;video-1&quot;,&quot;name&quot;:&quot;1.1%20intro&quot;}\"></iframe>"},{"cardorder":1,"knowledgeid":111,"description":"<iframe module=\"work\" data=\"{&quot;workid&quot;:&quot;w-1&quot;,&quot;schoolid&quot;:&quot;0&quot;,&quot;_jobid&quot;:&quot;work-1&quot;}\"></iframe>"}]}}]}`
+
+func TestGetTasksXuexitong_FromCards(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtKnowledgeCards(xxtFakeKnowledgeCards, nil)()
+	// Attachment data is present but must be ignored in favour of card discovery.
+	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"attachments":[{"id":"ignore","type":"video","objectid":"ignore"}]}}`
+	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 2 {
+		t.Fatalf("expected 2 card tasks, got %d: %+v", len(res.Tasks), res.Tasks)
+	}
+	if res.Tasks[0].Type != "video" || res.Tasks[0].ID != "obj-vid" {
+		t.Fatalf("unexpected video task: %+v", res.Tasks[0])
+	}
+	if res.Tasks[0].Raw["jobId"] != "video-1" {
+		t.Fatalf("video jobId not carried: %+v", res.Tasks[0].Raw)
+	}
+	if res.Tasks[0].Name != "1.1 intro" {
+		t.Fatalf("video title not URL-decoded: %+v", res.Tasks[0])
+	}
+	if res.Tasks[1].Type != "quiz" || res.Tasks[1].ID != "work-1" {
+		t.Fatalf("unexpected work/quiz task: %+v", res.Tasks[1])
+	}
+	if res.Tasks[1].Raw["workId"] != "w-1" || res.Tasks[1].Raw["schoolId"] != "0" {
+		t.Fatalf("work ids not carried: %+v", res.Tasks[1].Raw)
+	}
+}
+
+func TestGetTasksXuexitong_CardErrorFallsBackToAttachments(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtKnowledgeCards("", errors.New("network")) ()
+	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"attachments":[{"id":"att1","type":"video","objectid":"obj1"}]}}`
+	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 1 || res.Tasks[0].ID != "obj1" {
+		t.Fatalf("expected attachment fallback task, got %+v", res.Tasks)
+	}
+}
+
+func TestGetTasksXuexitong_EmptyCardsYieldsNoTasks(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	// Cards fetch succeeds but the node is a container with no points: must NOT fall
+	// back to attachments (a genuine 0-task node stays 0-task).
+	defer fakeXxtKnowledgeCards(`{"data":[{"card":{"data":[]}}]}`, nil)()
+	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"attachments":[{"id":"att1","type":"video","objectid":"obj1"}]}}`
+	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 0 {
+		t.Fatalf("empty cards should yield 0 tasks (no attachment fallback), got %+v", res.Tasks)
+	}
+}
+
+// --- point-status pre-filter (job/myjobsnodesmap) ---
+
+func TestGetCourseDetailXuexitong_AnnotatesPointStatus(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtChapter(xxtFakeChapter, nil)()
+	// nodes 111 (complete 3/3) and 222 (partial 1/2).
+	defer fakeXxtPointStatus(`{"111":{"totalcount":3,"finishcount":3,"unfinishcount":0},"222":{"totalcount":2,"finishcount":1,"unfinishcount":1}}`, nil)()
+	// Numeric userId so the status fetch actually runs.
+	courseJSON := `{"platform":"xuexitong","id":"9001","raw":{"courseId":"9001","classId":"2001","cpi":"1001","key":"2001","userId":"7001"}}`
+	e := parseEnvelope(t, GetCourseDetail(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetCourseDetail failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var detail CourseDetailResult
+	json.Unmarshal(b, &detail)
+	if len(detail.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(detail.Items))
+	}
+	if detail.Items[0].Raw["pointTotal"] != float64(3) || detail.Items[0].Raw["pointFinished"] != float64(3) {
+		t.Fatalf("node 111 status not annotated: %+v", detail.Items[0].Raw)
+	}
+	if detail.Items[1].Raw["pointTotal"] != float64(2) || detail.Items[1].Raw["pointFinished"] != float64(1) {
+		t.Fatalf("node 222 status not annotated: %+v", detail.Items[1].Raw)
+	}
+}
+
+func TestGetTasksXuexitong_SkipsCompletedNode(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	// Cards would yield 2 tasks if fetched — proves the completed node skips the fetch.
+	defer fakeXxtKnowledgeCards(xxtFakeKnowledgeCards, nil)()
+	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"pointTotal":3,"pointFinished":3}}`
+	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 0 {
+		t.Fatalf("completed node should yield 0 tasks without fetching cards, got %+v", res.Tasks)
+	}
+}
+
+func TestGetTasksXuexitong_IncompleteNodeFetchesCards(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtKnowledgeCards(xxtFakeKnowledgeCards, nil)()
+	// 1 of 3 done → not complete → cards are fetched (2 tasks).
+	courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"pointTotal":3,"pointFinished":1}}`
+	e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 2 {
+		t.Fatalf("incomplete node should fetch cards (2 tasks), got %d: %+v", len(res.Tasks), res.Tasks)
 	}
 }
 

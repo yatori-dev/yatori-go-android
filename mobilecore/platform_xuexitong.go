@@ -34,6 +34,19 @@ var xxtCardProvider = func(c *xxtmobile.XxtClient, classId, courseId, knowledgeI
 	return c.FetchChapterCords2Api(classId, courseId, knowledgeId, cpi, 3, nil)
 }
 
+// xxtKnowledgeCardsProvider fetches a knowledge node's task-point cards (gas/knowledge).
+// This is the authoritative task-point discovery source (mirrors console FetchChapterCords);
+// the chapter tree's attachment field is only a legacy fallback.
+var xxtKnowledgeCardsProvider = func(c *xxtmobile.XxtClient, nodeID, courseID int) (string, error) {
+	return c.FetchKnowledgeCardsApi(nodeID, courseID, 3, nil)
+}
+
+// xxtPointStatusProvider fetches per-node task-point completion (job/myjobsnodesmap) so
+// getTasks can skip already-finished nodes without fetching their cards.
+var xxtPointStatusProvider = func(c *xxtmobile.XxtClient, nodes []int, clazzID, userID, cpi, courseID int) (string, error) {
+	return c.FetchChapterPointStatusApi(nodes, clazzID, userID, cpi, courseID, 3, nil)
+}
+
 var xxtVideoDtoProvider = func(c *xxtmobile.XxtClient, objectID string, fid int) (string, error) {
 	return c.FetchVideoDtoApi(objectID, fid, 3, nil)
 }
@@ -242,7 +255,59 @@ func getCourseDetailXuexitong(sess SessionData, input CourseInput) (CourseDetail
 	if err != nil {
 		return CourseDetailResult{}, fmt.Errorf("xuexitong: course detail failed: %w", err)
 	}
-	return xxtParseChapter(raw, courseId, strconv.Itoa(key), strconv.Itoa(cpi))
+	result, err := xxtParseChapter(raw, courseId, strconv.Itoa(key), strconv.Itoa(cpi))
+	if err != nil {
+		return CourseDetailResult{}, err
+	}
+	// Best-effort: annotate each node with task-point completion so getTasks can skip
+	// already-finished nodes without fetching their cards (mirrors console ChapterFetchPointAction).
+	xxtAnnotatePointStatus(sess, &result, input, courseId, key, cpi)
+	return result, nil
+}
+
+// xxtAnnotatePointStatus queries job/myjobsnodesmap once for the whole course and writes
+// each node's pointTotal/pointFinished into its Raw. It is best-effort: any missing userId
+// or request/parse failure leaves nodes unannotated, so getTasks falls back to fetching cards.
+func xxtAnnotatePointStatus(sess SessionData, result *CourseDetailResult, input CourseInput, courseId string, key, cpi int) {
+	userIdStr := strOf(input.Raw["userId"])
+	if userIdStr == "" {
+		userIdStr = strOf(sess.Extra["userId"])
+	}
+	userID, err := strconv.Atoi(userIdStr)
+	if err != nil || userID == 0 {
+		return
+	}
+	courseID, err := strconv.Atoi(courseId)
+	if err != nil {
+		return
+	}
+	nodes := make([]int, 0, len(result.Items))
+	for _, it := range result.Items {
+		if id, err := strconv.Atoi(it.ID); err == nil {
+			nodes = append(nodes, id)
+		}
+	}
+	if len(nodes) == 0 {
+		return
+	}
+	raw, err := xxtPointStatusProvider(xxtClient(sess), nodes, key, userID, cpi, courseID)
+	if err != nil {
+		return
+	}
+	status, err := xxtmobile.ParseNodePointStatus(raw)
+	if err != nil || len(status) == 0 {
+		return
+	}
+	for i := range result.Items {
+		id, err := strconv.Atoi(result.Items[i].ID)
+		if err != nil {
+			continue
+		}
+		if st, ok := status[id]; ok {
+			result.Items[i].Raw["pointTotal"] = st.Total
+			result.Items[i].Raw["pointFinished"] = st.Finished
+		}
+	}
 }
 
 func xxtParseChapter(raw, courseId, classId, cpi string) (CourseDetailResult, error) {
@@ -386,41 +451,182 @@ func getTasksXuexitong(sess SessionData, input CourseInput) (TaskListResult, err
 	if courseId == "" || classId == "" || cpi == "" {
 		return TaskListResult{}, fmt.Errorf("xuexitong: courseJSON.raw must include courseId, classId, cpi")
 	}
-	tasks := make([]TaskItem, 0)
-	if attsRaw, ok := input.Raw["attachments"]; ok {
-		if atts, ok := attsRaw.([]interface{}); ok {
-			for _, a := range atts {
-				if m, ok := a.(map[string]interface{}); ok {
-					id, _ := m["id"].(string)
-					typ, _ := m["type"].(string)
-					objectid, _ := m["objectid"].(string)
-					extension, _ := m["extension"].(string)
-					taskID := objectid
-					if taskID == "" {
-						taskID = id
-					}
-					if taskID == "" {
-						continue
-					}
-					tasks = append(tasks, TaskItem{
-						ID:   taskID,
-						Name: typ,
-						Type: xxtPointType(typ),
-						Raw: map[string]interface{}{
-							"courseId":     courseId,
-							"classId":      classId,
-							"cpi":          cpi,
-							"knowledgeId":  knowledgeId,
-							"objectId":     objectid,
-							"attachmentId": id,
-							"extension":    extension,
-						},
-					})
-				}
-			}
+	// Primary: card-based discovery (gas/knowledge → iframe task points), matching the
+	// console. The chapter tree's inline attachment field is unreliable (often empty and
+	// missing jobId), so we only fall back to it when the cards fetch/parse fails.
+	if knowledgeId != "" {
+		// Skip nodes getCourseDetail already flagged as fully complete — no card fetch needed.
+		if xxtNodeAlreadyComplete(input.Raw) {
+			return TaskListResult{Platform: "xuexitong", ParentID: input.ID, Tasks: []TaskItem{}}, nil
+		}
+		if tasks, ok := xxtTasksFromCards(sess, courseId, classId, cpi, knowledgeId); ok {
+			return TaskListResult{Platform: "xuexitong", ParentID: input.ID, Tasks: tasks}, nil
 		}
 	}
-	return TaskListResult{Platform: "xuexitong", ParentID: input.ID, Tasks: tasks}, nil
+	return TaskListResult{
+		Platform: "xuexitong",
+		ParentID: input.ID,
+		Tasks:    xxtTasksFromAttachments(input, courseId, classId, cpi, knowledgeId),
+	}, nil
+}
+
+// xxtTasksFromCards discovers task points for one knowledge node via the cards API.
+// Returns (tasks, true) whenever the fetch+parse succeeds (even with zero points, so a
+// genuine container node yields no tasks); returns (nil, false) only on error so the
+// caller can fall back to the legacy attachment source.
+func xxtTasksFromCards(sess SessionData, courseId, classId, cpi, knowledgeId string) ([]TaskItem, bool) {
+	nodeID, err1 := strconv.Atoi(knowledgeId)
+	courseID, err2 := strconv.Atoi(courseId)
+	if err1 != nil || err2 != nil {
+		return nil, false
+	}
+	c := xxtClient(sess)
+	raw, err := xxtKnowledgeCardsProvider(c, nodeID, courseID)
+	if err != nil {
+		return nil, false
+	}
+	points, err := xxtmobile.ParseKnowledgePoints(raw)
+	if err != nil {
+		return nil, false
+	}
+	tasks := make([]TaskItem, 0, len(points))
+	for _, p := range points {
+		taskType := xxtPointType(p.Module)
+		if !xxtKnownTaskType(taskType) {
+			continue
+		}
+		taskID := p.ObjectID
+		if taskID == "" {
+			taskID = p.JobID
+		}
+		if taskID == "" {
+			taskID = p.WorkID
+		}
+		if taskID == "" {
+			continue
+		}
+		raw := map[string]interface{}{
+			"courseId":    courseId,
+			"classId":     classId,
+			"cpi":         cpi,
+			"knowledgeId": knowledgeId,
+			"objectId":    p.ObjectID,
+			"module":      p.Module,
+			"cardIndex":   p.CardIndex,
+		}
+		if p.JobID != "" {
+			raw["jobId"] = p.JobID
+		}
+		if p.WorkID != "" {
+			raw["workId"] = p.WorkID
+		}
+		if p.SchoolID != "" {
+			raw["schoolId"] = p.SchoolID
+		}
+		name := p.Title
+		if name == "" {
+			name = p.Module
+		}
+		tasks = append(tasks, TaskItem{ID: taskID, Name: name, Type: taskType, Raw: raw})
+	}
+	return tasks, true
+}
+
+// xxtTasksFromAttachments is the legacy discovery path: it reads task points from the
+// chapter tree's inline attachment data (input.Raw["attachments"]). Kept as a fallback
+// for when the cards API is unavailable.
+func xxtTasksFromAttachments(input CourseInput, courseId, classId, cpi, knowledgeId string) []TaskItem {
+	tasks := make([]TaskItem, 0)
+	attsRaw, ok := input.Raw["attachments"]
+	if !ok {
+		return tasks
+	}
+	atts, ok := attsRaw.([]interface{})
+	if !ok {
+		return tasks
+	}
+	for _, a := range atts {
+		m, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := m["id"].(string)
+		typ, _ := m["type"].(string)
+		objectid, _ := m["objectid"].(string)
+		extension, _ := m["extension"].(string)
+		taskID := objectid
+		if taskID == "" {
+			taskID = id
+		}
+		if taskID == "" {
+			continue
+		}
+		tasks = append(tasks, TaskItem{
+			ID:   taskID,
+			Name: typ,
+			Type: xxtPointType(typ),
+			Raw: map[string]interface{}{
+				"courseId":     courseId,
+				"classId":      classId,
+				"cpi":          cpi,
+				"knowledgeId":  knowledgeId,
+				"objectId":     objectid,
+				"attachmentId": id,
+				"extension":    extension,
+			},
+		})
+	}
+	return tasks
+}
+
+// xxtKnownTaskType reports whether a resolved point type is one we can schedule.
+// Mirrors the handled cases in the console's ChapterFetchCardsAction switch.
+func xxtKnownTaskType(t string) bool {
+	switch t {
+	case "video", "audio", "document", "read", "live", "bbs", "quiz", "hyperlink":
+		return true
+	}
+	return false
+}
+
+// xxtNodeAlreadyComplete reports whether a node was flagged fully complete by the
+// point-status pre-filter (getCourseDetail). When the status is absent it returns false,
+// so getTasks fetches the cards as usual. Total==Finished also covers a zero-point
+// container node (0==0), which has nothing to schedule.
+func xxtNodeAlreadyComplete(raw map[string]interface{}) bool {
+	total, ok1 := xxtRawInt(raw, "pointTotal")
+	finished, ok2 := xxtRawInt(raw, "pointFinished")
+	if !ok1 || !ok2 {
+		return false
+	}
+	return total == finished
+}
+
+// xxtRawInt reads an int from a Raw field, tolerating the float64/json.Number/string
+// forms it can take after a JSON round-trip. The bool reports whether the field existed.
+func xxtRawInt(raw map[string]interface{}, key string) (int, bool) {
+	v, ok := raw[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	switch t := v.(type) {
+	case float64:
+		return int(t), true
+	case int:
+		return t, true
+	case int64:
+		return int(t), true
+	case json.Number:
+		n, _ := t.Int64()
+		return int(n), true
+	case string:
+		n, err := strconv.Atoi(t)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 func xxtPointType(t string) string {
