@@ -90,11 +90,19 @@ fun CoursesScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, is
         sessions = repo.listSessions()
     }
 
-    // Reload on first composition and periodically. isActive change (tab switch) does NOT
-    // trigger an immediate reload to avoid lag; the 60-second timer is enough for this low-priority tab.
+    // Initial load on first composition.
     LaunchedEffect(Unit) {
         reload()
     }
+    // Edit then refresh.
+    val currentRoute = nav.current
+    val prevRoute = remember { mutableStateOf(currentRoute) }
+    LaunchedEffect(currentRoute) {
+        val returnedToRoot = prevRoute.value != null && currentRoute == null
+        prevRoute.value = currentRoute
+        if (returnedToRoot && isActive) reload()
+    }
+    // Periodic safety refresh while the tab is active.
     LaunchedEffect(isActive) {
         if (!isActive) return@LaunchedEffect
         while (true) {
