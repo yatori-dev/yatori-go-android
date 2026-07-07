@@ -12,11 +12,11 @@ import java.io.OutputStream
 
 const val LOG_EXPORT_MIME_TYPE = "application/zip"
 
-suspend fun prepareLogExport(container: AppContainer, context: Context): Result<File> =
+suspend fun prepareLogExport(container: AppContainer, context: Context, name: String? = null): Result<File> =
     withContext(Dispatchers.IO) {
         runCatching {
             val cacheDir = File(context.cacheDir, "log-export").apply { mkdirs() }
-            container.logStore.exportToZip(cacheDir, includeJsonl = true)
+            container.logStore.exportToZip(cacheDir, name = name, includeJsonl = true)
         }
     }
 

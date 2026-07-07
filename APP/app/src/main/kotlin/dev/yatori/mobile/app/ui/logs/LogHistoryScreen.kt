@@ -1,6 +1,9 @@
 package dev.yatori.mobile.app.ui.logs
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.ExitTransition
@@ -20,17 +23,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.localFullTime
 import dev.yatori.mobile.app.di.AppContainer
 import dev.yatori.mobile.app.ui.common.EmptyState
 import dev.yatori.mobile.app.ui.common.SecondaryScaffold
+import dev.yatori.mobile.app.ui.common.TopBarAction
 import dev.yatori.mobile.app.ui.nav.Navigator
 import dev.yatori.mobile.runtime.log.LogFileMeta
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -39,8 +49,27 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 fun LogHistoryScreen(container: AppContainer, nav: Navigator) {
     val store = container.logStore
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val history = remember { runCatching { store.listHistory() }.getOrDefault(emptyList()) }
     var selected by remember { mutableStateOf<LogFileMeta?>(null) }
+    var pendingExport by remember { mutableStateOf<java.io.File?>(null) }
+
+    val saveLogLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument(LOG_EXPORT_MIME_TYPE),
+    ) { uri ->
+        val zip = pendingExport
+        pendingExport = null
+        when {
+            uri == null -> Toast.makeText(context, "已取消导出", Toast.LENGTH_SHORT).show()
+            zip == null -> Toast.makeText(context, "导出失败", Toast.LENGTH_SHORT).show()
+            else -> scope.launch {
+                saveLogExport(context, zip, uri)
+                    .onSuccess { Toast.makeText(context, "日志已保存", Toast.LENGTH_SHORT).show() }
+                    .onFailure { Toast.makeText(context, "导出失败", Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
 
     // Viewing a single file is an in-screen drill-down: back returns to the file list first,
     // and only pops the whole screen once we're back at the overview.
@@ -50,6 +79,33 @@ fun LogHistoryScreen(container: AppContainer, nav: Navigator) {
         title = "历史日志",
         nav = nav,
         onBack = { if (selected != null) selected = null else nav.pop() },
+        actions = {
+            // Export/share only while viewing one specific history file — scoped to that file,
+            // mirroring the 日志 tab's top-bar actions (which act on the current session).
+            val sel = selected
+            if (sel != null) {
+                TopBarAction(Icons.Rounded.Download, "导出 ZIP", onClick = {
+                    scope.launch {
+                        prepareLogExport(container, context, sel.name)
+                            .onSuccess { zip ->
+                                pendingExport = zip
+                                saveLogLauncher.launch(zip.name)
+                            }
+                            .onFailure { e -> Toast.makeText(context, "导出失败：${e.message}", Toast.LENGTH_LONG).show() }
+                    }
+                })
+                TopBarAction(Icons.Rounded.IosShare, "分享 ZIP", onClick = {
+                    scope.launch {
+                        prepareLogExport(container, context, sel.name)
+                            .onSuccess { zip ->
+                                shareLogExport(context, zip)
+                                    .onFailure { e -> Toast.makeText(context, "分享失败：${e.message}", Toast.LENGTH_LONG).show() }
+                            }
+                            .onFailure { e -> Toast.makeText(context, "分享失败：${e.message}", Toast.LENGTH_LONG).show() }
+                    }
+                })
+            }
+        },
     ) { innerPadding ->
         // Slide list ↔ detail like a push/pop: open a file → detail slides in from the right;
         // back → detail slides out to the right and the list reappears beneath it.
