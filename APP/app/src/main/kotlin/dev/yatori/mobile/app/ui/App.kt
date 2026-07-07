@@ -57,6 +57,7 @@ import dev.yatori.mobile.app.ui.courses.CourseRuleEditorScreen
 import dev.yatori.mobile.app.ui.courses.CoursesScreen
 import dev.yatori.mobile.app.ui.courses.QuestionHistoryScreen
 import dev.yatori.mobile.app.ui.home.HomeScreen
+import dev.yatori.mobile.app.ui.logs.LogHistoryDetailScreen
 import dev.yatori.mobile.app.ui.logs.LogHistoryScreen
 import dev.yatori.mobile.app.ui.logs.LogsScreen
 import dev.yatori.mobile.app.ui.nav.Route
@@ -263,6 +264,7 @@ fun YatoriApp(
                                 is Route.CourseRuleEditor -> CourseRuleEditorScreen(container, nav, route.platform, route.account)
                                 is Route.QuestionHistory  -> QuestionHistoryScreen(container, nav, route.operationId)
                                 is Route.LogHistory       -> LogHistoryScreen(container, nav)
+                                is Route.LogHistoryDetail -> LogHistoryDetailScreen(container, nav, route.fileName)
                                 is Route.ThemeSettings    -> ThemeSettingsScreen(nav, themeState, onThemeChange)
                                 is Route.EmailNotification -> EmailNotificationScreen(container, nav)
                                 is Route.AiSettings       -> AiSettingsScreen(container, nav)

@@ -24,6 +24,7 @@ sealed interface Route {
     data class CourseDetail(val platform: String, val account: String, val courseId: String) : Route
     data class CourseRuleEditor(val platform: String, val account: String) : Route
     data object LogHistory : Route
+    data class LogHistoryDetail(val fileName: String) : Route
     data object ThemeSettings : Route
     data object EmailNotification : Route
     data object AiSettings : Route
