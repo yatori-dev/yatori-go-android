@@ -404,3 +404,26 @@ func TestParseCardHTMLForVideoTask_NotFound(t *testing.T) {
 		t.Fatal("expected error when not found")
 	}
 }
+
+func TestParseCardHTMLForVideoTask_RealNestedDocThenVideo(t *testing.T) {
+	// Mirrors the real SSR payload: a document attachment (objectid only in property, no
+	// top-level objectid) precedes the video. Requesting the video's objectid must return the
+	// VIDEO's jobid — the old top-level-only parser leaked the document's jobid instead.
+	cardHTML := `<script type="text/javascript">window.AttachmentSetting = {"attachments":[` +
+		`{"jobid":"doc-job","otherInfo":"nodeId_1-cpi_2","jtoken":"jt","type":"document","property":{"jobid":"doc-job","objectid":"obj-doc","module":"insertdoc"}},` +
+		`{"otherInfo":"nodeId_1-cpi_2-enc_abc&courseId=9001","type":"video","jobid":"vid-job","property":{"objectid":"obj-vid","module":"insertvideo","jobid":"vid-job"},"objectId":"obj-vid"}` +
+		`],"defaults":{"fid":"1590","userid":"u1"}};</script>`
+	meta, err := mobile.ParseCardHTMLForVideoTask(cardHTML, "obj-vid")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if meta.JobID != "vid-job" {
+		t.Fatalf("jobId=%q want vid-job (document attachment leaked?)", meta.JobID)
+	}
+	if meta.ObjectID != "obj-vid" {
+		t.Fatalf("objectId=%q want obj-vid", meta.ObjectID)
+	}
+	if meta.OtherInfo != "nodeId_1-cpi_2-enc_abc" {
+		t.Fatalf("otherInfo=%q want trailing &courseId stripped", meta.OtherInfo)
+	}
+}

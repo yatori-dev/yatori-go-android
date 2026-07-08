@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,35 +26,6 @@ type VideoTaskMeta struct {
 type VideoDtoMeta struct {
 	DToken   string
 	Duration int
-}
-
-// FetchChapterCords2Api fetches card HTML for a knowledge node.
-// The response HTML contains embedded attachment JSON with jobId/otherInfo.
-func (c *XxtClient) FetchChapterCords2Api(classId, courseId, knowledgeId, cpi string, retry int, lastErr error) (string, error) {
-	if retry < 0 {
-		return "", lastErr
-	}
-	urlStr := fmt.Sprintf(
-		"https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=%s&courseid=%s&knowledgeid=%s&num=0&ut=s&cpi=%s&v=2025-0424-1038-3&mooc2=1&isMicroCourse=false",
-		classId, courseId, knowledgeId, cpi,
-	)
-	req, err := http.NewRequest("GET", urlStr, nil)
-	if err != nil {
-		return c.FetchChapterCords2Api(classId, courseId, knowledgeId, cpi, retry-1, err)
-	}
-	addCookies(req, c)
-	req.Header.Add("User-Agent", mobileUA())
-	resp, err := (&http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}).Do(req)
-	if err != nil {
-		return c.FetchChapterCords2Api(classId, courseId, knowledgeId, cpi, retry-1, err)
-	}
-	defer resp.Body.Close()
-	mergeCookies(c, resp.Cookies())
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return c.FetchChapterCords2Api(classId, courseId, knowledgeId, cpi, retry-1, err)
-	}
-	return string(body), nil
 }
 
 // ParseCardHTMLForVideoTask extracts VideoTaskMeta from card HTML.
@@ -100,12 +72,21 @@ func parseAttachmentJSON(raw, targetObjectID string) (VideoTaskMeta, error) {
 		if !ok {
 			continue
 		}
-		objectId := jsonStr(m, "objectid", "objectId")
+		// objectid/jobid live inside "property" on real card payloads (the top-level objectId
+		// exists only for videos); read property first, top-level as fallback. Matching by
+		// objectid is what lets us skip a sibling document attachment on the same node.
+		property, _ := m["property"].(map[string]interface{})
+		objectId := firstNonEmptyString(jsonStr(m, "objectid", "objectId"), jsonStr(property, "objectid", "objectId"))
 		if targetObjectID != "" && objectId != "" && objectId != targetObjectID {
 			continue
 		}
-		jobId := jsonStr(m, "jobid", "_jobid")
+		jobId := firstNonEmptyString(jsonStr(m, "jobid", "_jobid"), jsonStr(property, "jobid", "_jobid"))
+		// otherInfo carries a trailing "&courseId=..." that must be stripped before it is used
+		// as a query value (the submit URL sets courseId separately); the original core trims it.
 		otherInfo := jsonStr(m, "otherInfo", "otherinfo")
+		if i := strings.IndexByte(otherInfo, '&'); i >= 0 {
+			otherInfo = otherInfo[:i]
+		}
 		if jobId != "" {
 			return VideoTaskMeta{JobID: jobId, ObjectID: objectId, OtherInfo: otherInfo}, nil
 		}

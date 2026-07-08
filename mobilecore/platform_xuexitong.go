@@ -31,7 +31,14 @@ var xxtCourseListProvider = func(c *xxtmobile.XxtClient) (string, error) {
 }
 
 var xxtCardProvider = func(c *xxtmobile.XxtClient, classId, courseId, knowledgeId, cpi string) (string, error) {
-	return c.FetchChapterCords2Api(classId, courseId, knowledgeId, cpi, 3, nil)
+	// Use the mobile SSR endpoint (mooc1-api /knowledge/cards?isPhone=1&control=true), which
+	// embeds window.AttachmentSetting — the structure the parsers expect and the original
+	// console/core relies on. The mooc2 web endpoint does NOT include AttachmentSetting.
+	ci, _ := strconv.Atoi(classId)
+	co, _ := strconv.Atoi(courseId)
+	kn, _ := strconv.Atoi(knowledgeId)
+	cp, _ := strconv.Atoi(cpi)
+	return c.PageMobileChapterCardApi(ci, co, kn, 0, cp, 3, nil)
 }
 
 // xxtKnowledgeCardsProvider fetches a knowledge node's task-point cards (gas/knowledge).
