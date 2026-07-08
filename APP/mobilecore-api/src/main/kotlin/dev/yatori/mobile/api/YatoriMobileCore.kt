@@ -94,7 +94,11 @@ class YatoriMobileCore {
     suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> = io {
         EnvelopeParser.parse(Mobilecore.getTasks(gson.toJson(session), gson.toJson(course))) { data ->
             val type = object : TypeToken<List<TaskItem>>() {}.type
-            gson.fromJson(platformFilledArray(data.getAsJsonArray("tasks"), session.platform), type)
+            val tasks = platformFilledArray(data.getAsJsonArray("tasks"), session.platform)
+            // gson ignores Kotlin default values: a task JSON missing (or null-valued) non-null
+            // String field deserializes to null and later throws on TaskItem.copy(). Coerce to "".
+            tasks.forEach { if (it.isJsonObject) it.asJsonObject.ensureStringDefaults("status", "name", "type") }
+            gson.fromJson(tasks, type)
         }
     }
 
@@ -142,4 +146,9 @@ class YatoriMobileCore {
 
     private fun JsonObject.string(key: String): String =
         runCatching { get(key)?.takeUnless { it.isJsonNull }?.asString.orEmpty() }.getOrDefault("")
+
+    /** Fill missing/null string properties with "" so gson doesn't leave non-null DTO fields null. */
+    private fun JsonObject.ensureStringDefaults(vararg keys: String) {
+        for (k in keys) if (get(k)?.isJsonNull != false) addProperty(k, "")
+    }
 }

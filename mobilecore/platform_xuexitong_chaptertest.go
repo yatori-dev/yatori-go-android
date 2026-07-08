@@ -97,6 +97,22 @@ func xxtPullChapterTest(sess SessionData, input TaskInput) (RunTaskResult, error
 	if err != nil {
 		return RunTaskResult{}, err
 	}
+	// The work HTML doesn't always carry courseId/classId (and cpi/knowledgeId) inputs; the node
+	// context (raw) is the authoritative source — the same provenance the original console relies
+	// on, and this action already required raw.courseId/classId above. Backfill so the later
+	// chapterTest submit has them (otherwise it errors "requires options.paper.meta").
+	if meta.CourseId == "" {
+		meta.CourseId = courseId
+	}
+	if meta.ClassId == "" {
+		meta.ClassId = classId
+	}
+	if meta.Cpi == "" {
+		meta.Cpi = cpi
+	}
+	if meta.Knowledgeid == "" {
+		meta.Knowledgeid = knowledgeId
+	}
 	questions, err := xxtmobile.ParseChapterTestQuestions(raw)
 	if err != nil {
 		return RunTaskResult{}, err
