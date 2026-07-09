@@ -40,6 +40,11 @@ class PlatformTaskSchedulerTest {
             addProperty("courseId", "course1")
             addProperty("duration", 60)
         })
+        // startHaiqikejiProgress first calls getProgress to resume the watch position
+        // (mirrors console HqkjGetNodeProgressAction), so the sequence is getProgress→start→submit→end.
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "done", raw = JsonObject().apply {
+            addProperty("progress", 0)
+        }))
         gateway.results.add(RunTaskResult("haiqikeji", "node1", "started", raw = JsonObject().apply {
             addProperty("sessionId", "sid-1")
         }))
@@ -55,9 +60,9 @@ class PlatformTaskSchedulerTest {
         val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
 
         assertEquals("submitted", result.status)
-        assertEquals(listOf("start", "submit", "end"), gateway.options.map { it["action"] })
-        assertEquals(50, gateway.options[1]["progress"])
-        assertEquals(100, gateway.options[2]["progress"])
+        assertEquals(listOf("getProgress", "start", "submit", "end"), gateway.options.map { it["action"] })
+        assertEquals(50, gateway.options[2]["progress"])
+        assertEquals(100, gateway.options[3]["progress"])
         assertEquals(listOf(30_000L), gateway.sleeps)
         val state = store.loadActionState("haiqikeji", "stu", "node1", "haiqikeji-progress")!!
         assertEquals("sid-1", state.task.raw.get("sessionId").asString)
@@ -87,6 +92,8 @@ class PlatformTaskSchedulerTest {
             addProperty("jobId", "job-1")
             addProperty("duration", 116)
             addProperty("playingTime", 116)
+            // final tick reports isPassed so the 过超提交 over-submit loop is skipped
+            addProperty("isPassed", true)
         }))
 
         taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
@@ -94,7 +101,8 @@ class PlatformTaskSchedulerTest {
         assertEquals(listOf("audioPrepare", "audioTick", "audioTick"), gateway.options.map { it["action"] })
         assertEquals(58, gateway.options[1]["playingTime"])
         assertEquals(116, gateway.options[2]["playingTime"])
-        assertEquals(listOf(58_000L), gateway.sleeps)
+        // after the 58 s tick the scheduler adds a random 10–60 s inter-task sleep, so only assert the tick cadence
+        assertEquals(58_000L, gateway.sleeps.first())
         assertEquals(116.0, store.loadActionState("xuexitong", "stu", "audio1", "xuexitong-audio")!!.progress)
     }
 
@@ -124,6 +132,8 @@ class PlatformTaskSchedulerTest {
             addProperty("dtoken", "token-1")
             addProperty("duration", 116)
             addProperty("playingTime", 116)
+            // final tick reports isPassed so the 过超提交 over-submit loop is skipped
+            addProperty("isPassed", true)
         }))
 
         taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
@@ -131,7 +141,8 @@ class PlatformTaskSchedulerTest {
         assertEquals(listOf("videoPrepare", "videoTick", "videoTick"), gateway.options.map { it["action"] })
         assertEquals(58, gateway.options[1]["playingTime"])
         assertEquals(116, gateway.options[2]["playingTime"])
-        assertEquals(listOf(58_000L), gateway.sleeps)
+        // after the 58 s tick the scheduler adds a random 10–60 s inter-task sleep, so only assert the tick cadence
+        assertEquals(58_000L, gateway.sleeps.first())
         assertEquals(116.0, store.loadActionState("xuexitong", "stu", "video1", "xuexitong-video")!!.progress)
     }
 

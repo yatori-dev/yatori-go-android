@@ -159,7 +159,7 @@ class CourseSyncManagerTest {
         assertEquals(listOf("t1"), submitted)
         assertEquals("t1", request?.task?.id)
         assertEquals("captcha", request?.result?.status)
-        assertTrue(events.any { it.message.contains("requires captcha") })
+        assertTrue(events.any { it.message.contains("需要验证码") })
     }
 
     @Test
@@ -284,7 +284,7 @@ class CourseSyncManagerTest {
 
         assertEquals(listOf("Option A"), runner.submittedAnswers)
         assertEquals(listOf(true), runner.submittedFinals)
-        assertTrue(events.any { it.message.contains("used fallback answer") })
+        assertTrue(events.any { it.message.contains("使用了备用答案") })
         val history = controller.questionHistory.value.single()
         assertEquals(QuestionHistoryStatus.SUBMITTED, history.status)
         assertEquals("fallback", history.answerSource)
@@ -352,7 +352,7 @@ class CourseSyncManagerTest {
         assertEquals(listOf(""), request?.suggestedAnswers)
         assertEquals(listOf("Edited Answer"), runner.submittedAnswers)
         assertEquals(listOf(true), runner.submittedFinals)
-        assertTrue(events.any { it.message.contains("awaiting manual answer edit") })
+        assertTrue(events.any { it.message.contains("等待手动填写答案") })
         assertTrue(controller.questionHistory.value.any { it.status == QuestionHistoryStatus.WAITING_EDIT })
         val history = controller.questionHistory.value.single { it.status == QuestionHistoryStatus.SUBMITTED }
         assertEquals(QuestionHistoryStatus.SUBMITTED, history.status)
@@ -404,7 +404,7 @@ class CourseSyncManagerTest {
         assertEquals(listOf(""), request?.suggestedAnswers)
         assertEquals("Edited BBS reply", runner.submittedContent.single())
         assertTrue(runner.realSubmit.single())
-        assertTrue(events.any { it.message.contains("awaiting content edit") })
+        assertTrue(events.any { it.message.contains("等待内容编辑") })
     }
 
     @Test
