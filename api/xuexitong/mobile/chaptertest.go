@@ -65,10 +65,15 @@ type ChapterTestCardMeta struct {
 	JobID    string
 	KToken   string
 	Enc      string
+	PUID     string // defaults.userid — the paper-fetch userid (chaoxing returns 信息提示 without it)
 	IsJob    bool
 }
 
-func ParseCardHTMLForChapterTest(html string) (ChapterTestCardMeta, error) {
+// ParseCardHTMLForChapterTest extracts the work's fetch tokens from the knowledge-card
+// attachmentSetting. ktoken is card-level; enc/workId/schoolId/jobId are per-attachment,
+// so when [targetWorkID] is given, prefer the matching attachment (a mismatched enc fails
+// the paper fetch). Falls back to the first work attachment.
+func ParseCardHTMLForChapterTest(html, targetWorkID string) (ChapterTestCardMeta, error) {
 	reAttach := regexp.MustCompile(`(?i)(?:window\.)?attachmentSetting\s*=\s*(\{[^;]+\})\s*;`)
 	m := reAttach.FindStringSubmatch(html)
 	if len(m) < 2 {
@@ -78,11 +83,13 @@ func ParseCardHTMLForChapterTest(html string) (ChapterTestCardMeta, error) {
 	if err := json.Unmarshal([]byte(m[1]), &root); err != nil {
 		return ChapterTestCardMeta{}, err
 	}
-	out := ChapterTestCardMeta{}
+	kToken, puid := "", ""
 	if defaults, _ := root["defaults"].(map[string]interface{}); defaults != nil {
-		out.KToken = jsonStr(defaults, "ktoken")
+		kToken = jsonStr(defaults, "ktoken")
+		puid = jsonStr(defaults, "userid")
 	}
 	attachments, _ := root["attachments"].([]interface{})
+	var first *ChapterTestCardMeta
 	for _, item := range attachments {
 		att, _ := item.(map[string]interface{})
 		if att == nil {
@@ -94,17 +101,24 @@ func ParseCardHTMLForChapterTest(html string) (ChapterTestCardMeta, error) {
 		if workID == "" || jobID == "" {
 			continue
 		}
-		out.WorkID = workID
-		out.SchoolID = jsonStr(property, "schoolid", "schoolId")
-		if out.SchoolID == "" {
-			out.SchoolID = "0"
+		schoolID := jsonStr(property, "schoolid", "schoolId")
+		if schoolID == "" {
+			schoolID = "0"
 		}
-		out.JobID = jobID
-		out.Enc = jsonStr(att, "enc")
+		cand := ChapterTestCardMeta{WorkID: workID, SchoolID: schoolID, JobID: jobID, KToken: kToken, Enc: jsonStr(att, "enc"), PUID: puid}
 		if b, ok := att["job"].(bool); ok {
-			out.IsJob = b
+			cand.IsJob = b
 		}
-		return out, nil
+		if targetWorkID != "" && workID == targetWorkID {
+			return cand, nil
+		}
+		if first == nil {
+			c := cand
+			first = &c
+		}
+	}
+	if first != nil {
+		return *first, nil
 	}
 	return ChapterTestCardMeta{}, fmt.Errorf("xuexitong: chapter-test work attachment not found")
 }
@@ -129,7 +143,10 @@ func (c *XxtClient) WorkFetchQuestionApi(courseId, classId, knowledgeId, cpi, wo
 	params.Add("cpi", cpi)
 	params.Add("ktoken", ktoken)
 	params.Add("enc", enc)
-	return c.workHTMLGet("https://mooc1-api.chaoxing.com/android/mworkspecial?"+params.Encode(), nil)
+	var finalURL string
+	html, err := c.workHTMLGet("https://mooc1-api.chaoxing.com/android/mworkspecial?"+params.Encode(), &finalURL)
+	c.LastWorkFetchURL = finalURL
+	return html, err
 }
 
 // WorkNewSubmitAnswerApi submits the whole chapter-test paper. isSubmit=true sends
@@ -396,7 +413,7 @@ func ParseChapterTestQuestions(html string) ([]ChapterTestQuestion, error) {
 		} else if strings.Contains(quesType, "投票题") {
 			quesType = XxtQTypeSingle
 		}
-		content := cleanChapterText(qdoc.Find(".Py-m1-title .workTextWrap").Text())
+		content := cleanChapterText(chapterQuestionText(qdoc))
 		q := ChapterTestQuestion{Qid: qid, Content: content}
 		switch quesType {
 		case XxtQTypeSingle:
@@ -516,4 +533,24 @@ func cleanChapterText(text string) string {
 	text = strings.TrimSpace(text)
 	text = regexp.MustCompile(`\n+`).ReplaceAllString(text, " ")
 	return regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+}
+
+var chapterLeadingIndex = regexp.MustCompile(`^\s*\d+\s*[.．、]\s*`)
+
+// chapterQuestionText extracts the question stem from a .Py-mian1 block. Real
+// chapter-test papers (and go-core's captured samples) put the stem directly inside
+// .Py-m1-title, after a .quesType span and a leading "N." index — there is no
+// .workTextWrap child. The previous selector (.Py-m1-title .workTextWrap) therefore
+// returned "" on live papers, leaving every question blank so no answer source could
+// match and the whole paper was submitted empty. Prefer .workTextWrap when a paper
+// does carry it (older layout), else strip the type span + leading index.
+func chapterQuestionText(qdoc *goquery.Document) string {
+	if wrap := qdoc.Find(".Py-m1-title .workTextWrap"); wrap.Length() > 0 {
+		if t := strings.TrimSpace(wrap.Text()); t != "" {
+			return t
+		}
+	}
+	title := qdoc.Find(".Py-m1-title").First().Clone()
+	title.Find(".quesType").Remove()
+	return chapterLeadingIndex.ReplaceAllString(strings.TrimSpace(title.Text()), "")
 }

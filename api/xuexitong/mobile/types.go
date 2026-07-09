@@ -19,10 +19,11 @@ const (
 
 // XxtClient holds a mobile-safe session for xuexitong (chaoxing).
 type XxtClient struct {
-	Name     string
-	Password string
-	UserID   string
-	Cookies  []*http.Cookie
+	Name             string
+	Password         string
+	UserID           string
+	Cookies          []*http.Cookie
+	LastWorkFetchURL string
 }
 
 // CookieStr returns "name=value; ..." for header use.

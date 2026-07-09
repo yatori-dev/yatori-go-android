@@ -13,11 +13,18 @@ import (
 )
 
 func xxtClient(sess SessionData) *xxtmobile.XxtClient {
-	return &xxtmobile.XxtClient{
+	c := &xxtmobile.XxtClient{
 		Name:    sess.Account,
 		UserID:  strOf(sess.Extra["userId"]),
 		Cookies: cookieStrToSlice(sess.Cookies),
 	}
+	// The paper-fetch / media endpoints require userid=<puid>; when the session didn't carry
+	// it, recover it from the UID cookie (what chaoxing's own pages use). Without it the work
+	// fetch bounces to a "信息提示" page and media submits fail with code=13.
+	if c.UserID == "" {
+		c.UserID = c.Puid()
+	}
+	return c
 }
 
 // --- replaceable providers ---

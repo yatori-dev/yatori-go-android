@@ -501,6 +501,10 @@ func (c *XxtClient) cookieValue(name string) string {
 	return ""
 }
 
+func (c *XxtClient) Puid() string {
+	return c.cookieValue("UID")
+}
+
 func jsonFloat(m map[string]interface{}, key string) float64 {
 	if v, ok := m[key].(float64); ok {
 		return v

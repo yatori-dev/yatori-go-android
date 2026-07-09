@@ -84,6 +84,49 @@ func TestParseChapterTestQuestions_Expired(t *testing.T) {
 	}
 }
 
+// The paper fetch needs userid=defaults.userid (go-core's PUID). Regression guard that the
+// card parser surfaces it alongside ktoken/enc.
+func TestParseCardHTMLForChapterTest_PUID(t *testing.T) {
+	html := `<script>window.attachmentSetting = {"defaults":{"ktoken":"KT","userid":"PU7"},"attachments":[{"enc":"E1","job":true,"property":{"workid":"W1","schoolid":"0","_jobid":"J1"}}]};</script>`
+	meta, err := ParseCardHTMLForChapterTest(html, "W1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.PUID != "PU7" || meta.KToken != "KT" || meta.Enc != "E1" || meta.WorkID != "W1" {
+		t.Fatalf("card meta wrong: %+v", meta)
+	}
+}
+
+// Live chaoxing papers put the stem directly inside .Py-m1-title (after the .quesType
+// span and a leading "N." index) with NO .workTextWrap child. Regression guard: the
+// stem must still be extracted, or every question is blank and no answer source can match.
+func TestParseChapterTestQuestions_LiveLayout(t *testing.T) {
+	html := `
+<div class="Py-mian1 singleQuesId" data="q1">
+  <div class="Py-m1-title fs16 fontLabel">1.<span class="quesType">[单选题]</span> 中国的首都是？ ( )</div>
+  <ul class="answerList singleChoice">
+    <li><em class="choose-opt">A</em><cc>北京</cc></li>
+    <li><em class="choose-opt">B</em><cc>上海</cc></li>
+  </ul>
+</div>`
+	qs, err := ParseChapterTestQuestions(html)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(qs) != 1 {
+		t.Fatalf("want 1 question, got %d", len(qs))
+	}
+	if !contains(qs[0].Content, "中国的首都是") {
+		t.Fatalf("stem not extracted from live layout: content=%q", qs[0].Content)
+	}
+	if contains(qs[0].Content, "单选题") || contains(qs[0].Content, "1.") {
+		t.Fatalf("stem must drop type span and leading index: content=%q", qs[0].Content)
+	}
+	if qs[0].Options["A"] != "北京" || qs[0].Options["B"] != "上海" {
+		t.Fatalf("options wrong: %v", qs[0].Options)
+	}
+}
+
 func TestChapterTestSubmitForm_Fields(t *testing.T) {
 	meta := &ChapterTestMeta{CourseId: "C1", ClassId: "CL1", TotalQuestionNum: "2", EncWork: "EW1", WorkRelationId: "WR1", Api: "API1", AnswerId: "A1", WorkAnswerId: "WA1", JobId: "J1", Knowledgeid: "K1", FullScore: "100"}
 	answers := []ChapterTestAnswer{

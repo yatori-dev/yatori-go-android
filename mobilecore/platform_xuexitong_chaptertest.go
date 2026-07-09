@@ -58,7 +58,12 @@ func xxtPullChapterTest(sess SessionData, input TaskInput) (RunTaskResult, error
 		return RunTaskResult{Platform: "xuexitong", TaskID: workId, Status: "dry_run", Message: "action=pullChapterTest"}, nil
 	}
 	c := xxtClient(sess)
-	if workId == "" {
+	// ktoken/enc are the paper-fetch auth tokens and live ONLY on the knowledge card, not in
+	// the task list. A quiz task carries workId but never ktoken/enc, so fetch the card
+	// whenever either is missing (not just when workId is unknown) — otherwise the paper
+	// fetch is unauthorized and chaoxing returns an empty error page, yielding 0 questions
+	// and an empty submit the server rejects with "无效的参数：code-1".
+	if workId == "" || ktoken == "" || enc == "" {
 		if knowledgeId == "" || cpi == "" {
 			return RunTaskResult{}, fmt.Errorf("xuexitong: action=pullChapterTest requires raw.knowledgeId and cpi to prepare missing card fields")
 		}
@@ -66,7 +71,7 @@ func xxtPullChapterTest(sess SessionData, input TaskInput) (RunTaskResult, error
 		if err != nil {
 			return RunTaskResult{}, fmt.Errorf("xuexitong: chapter-test card fetch failed: %w", err)
 		}
-		meta, err := xxtmobile.ParseCardHTMLForChapterTest(cardHTML)
+		meta, err := xxtmobile.ParseCardHTMLForChapterTest(cardHTML, workId)
 		if err != nil {
 			return RunTaskResult{}, fmt.Errorf("xuexitong: chapter-test card parse failed: %w", err)
 		}
@@ -84,6 +89,11 @@ func xxtPullChapterTest(sess SessionData, input TaskInput) (RunTaskResult, error
 		}
 		if enc == "" {
 			enc = meta.Enc
+		}
+		// defaults.userid from the card is the paper-fetch userid (go-core's PUID). Backfill it
+		// onto the client when the session lacked it and the UID cookie wasn't present either.
+		if c.UserID == "" && meta.PUID != "" {
+			c.UserID = meta.PUID
 		}
 	}
 	if workId == "" {
@@ -116,6 +126,18 @@ func xxtPullChapterTest(sess SessionData, input TaskInput) (RunTaskResult, error
 	questions, err := xxtmobile.ParseChapterTestQuestions(raw)
 	if err != nil {
 		return RunTaskResult{}, err
+	}
+	// A real paper always has questions. Zero means the fetch returned a non-paper page
+	// (auth rejected, redirect to login, permission wall). Fail loudly with the fetch inputs,
+	// the redirect landing URL, and a page snippet instead of silently proceeding to an empty
+	// submit the server rejects as "无效的参数".
+	if len(questions) == 0 {
+		snip := raw
+		if len(snip) > 700 {
+			snip = snip[:700]
+		}
+		return RunTaskResult{}, fmt.Errorf("xuexitong: chapter-test fetch returned 0 questions. inputs{workId=%q schoolId=%q jobId=%q ktokenLen=%d encLen=%d userId=%q} finalURL=%q rawLen=%d snippet=%q",
+			workId, schoolId, jobId, len(ktoken), len(enc), c.UserID, c.LastWorkFetchURL, len(raw), snip)
 	}
 	metaMap := map[string]interface{}{}
 	mb, _ := json.Marshal(meta)
@@ -172,15 +194,59 @@ func xxtSubmitChapterTest(sess SessionData, input TaskInput) (RunTaskResult, err
 		}
 		return RunTaskResult{}, fmt.Errorf("xuexitong: chapter-test submit failed: %w", err)
 	}
+	// Validate the server's actual verdict. The submit endpoint returns
+	// {"status":true,"msg":"success!"} on accept and {"status":false,"msg":"作业提交失败！"}
+	// on reject. Without this we would report "submitted" for a paper the server refused —
+	// the sibling xxtSubmitWork and the console reference both gate on this field.
+	var resp struct {
+		Status bool   `json:"status"`
+		Msg    string `json:"msg"`
+	}
+	_ = json.Unmarshal([]byte(raw), &resp)
+	if !resp.Status {
+		return RunTaskResult{}, fmt.Errorf("xuexitong: chapter-test submit rejected: %s | %s", raw, chapterSubmitDiag(&in.Meta, in.Answers, isSubmit))
+	}
 	status := "saved"
 	if isSubmit {
 		status = "submitted"
 	}
 	return RunTaskResult{
 		Platform: "xuexitong", TaskID: in.Meta.WorkRelationId, Status: status,
-		Message: fmt.Sprintf("isSubmit=%v", isSubmit),
-		Raw:     map[string]interface{}{"isSubmit": isSubmit, "raw": raw},
+		Message: fmt.Sprintf("isSubmit=%v msg=%s", isSubmit, resp.Msg),
+		Raw:     map[string]interface{}{"isSubmit": isSubmit, "raw": raw, "msg": resp.Msg},
 	}, nil
+}
+
+// chapterSubmitDiag builds a compact one-line diagnostic for a rejected submit: which
+// submit-context meta fields came through empty, and how many of the paper's answers
+// actually carried content. It pinpoints whether a rejection is an upstream fetch/parse
+// problem (answers=0 or core meta empty) or a structural one (all present but refused).
+func chapterSubmitDiag(meta *xxtmobile.ChapterTestMeta, answers []xxtmobile.ChapterTestAnswer, isSubmit bool) string {
+	var empty []string
+	chk := func(name, v string) {
+		if v == "" {
+			empty = append(empty, name)
+		}
+	}
+	chk("courseId", meta.CourseId)
+	chk("classId", meta.ClassId)
+	chk("encWork", meta.EncWork)
+	chk("totalQuestionNum", meta.TotalQuestionNum)
+	chk("answerId", meta.AnswerId)
+	chk("workAnswerId", meta.WorkAnswerId)
+	chk("api", meta.Api)
+	chk("workRelationId", meta.WorkRelationId)
+	chk("jobId", meta.JobId)
+	chk("cpi", meta.Cpi)
+	chk("knowledgeid", meta.Knowledgeid)
+	chk("fullScore", meta.FullScore)
+	withAns := 0
+	for _, a := range answers {
+		if len(a.Answers) > 0 {
+			withAns++
+		}
+	}
+	return fmt.Sprintf("diag isSubmit=%v answers=%d/%d emptyMeta=%v", isSubmit, withAns, len(answers), empty)
 }
 
 // xxtPassChapterCaptcha (action="passChapterCaptcha") submits the host's OCR result.

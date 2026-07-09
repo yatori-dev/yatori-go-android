@@ -30,7 +30,7 @@ func TestRunTaskXuexitong_PullChapterTest(t *testing.T) {
 	Init("/tmp/test")
 	defer fakeXxtChapterFetch(xxtChapterPaperHTML, nil)()
 
-	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"C1","classId":"CL1","workId":"W1","knowledgeId":1,"cpi":"9"},"options":{"action":"pullChapterTest"}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"C1","classId":"CL1","workId":"W1","knowledgeId":1,"cpi":"9","ktoken":"KT1","enc":"EN1"},"options":{"action":"pullChapterTest"}}`
 	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("pullChapterTest should succeed: %s", e.Error)
@@ -77,6 +77,79 @@ func TestRunTaskXuexitong_PullChapterTestFromCard(t *testing.T) {
 	json.Unmarshal(b, &res)
 	if res.TaskID != "W2" || res.Status != "questions" {
 		t.Fatalf("unexpected result: task=%q status=%q", res.TaskID, res.Status)
+	}
+}
+
+// Regression for the "无效的参数：code-1" empty-submit: a quiz task carries workId but no
+// ktoken/enc (those live only on the card). The pull must still fetch the card to obtain
+// them, or the paper fetch is unauthorized and every question comes back empty.
+func TestRunTaskXuexitong_PullChapterTest_MissingTokensFetchesCard(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	cardHTML := `<script>window.attachmentSetting = {"defaults":{"ktoken":"K9","userid":"PU9"},"attachments":[{"enc":"E9","job":true,"property":{"workid":"W1","schoolid":"S9","_jobid":"J9"}}]};</script>`
+	defer fakeXxtCard(cardHTML, nil)()
+	orig := xxtChapterFetchProvider
+	var gotWorkId, gotKToken, gotEnc, gotUserId string
+	xxtChapterFetchProvider = func(c *xxtmobile.XxtClient, _, _, _, _, workId, _, _, ktoken, enc string) (string, error) {
+		gotWorkId, gotKToken, gotEnc, gotUserId = workId, ktoken, enc, c.UserID
+		return xxtChapterPaperHTML, nil
+	}
+	defer func() { xxtChapterFetchProvider = orig }()
+
+	// Session with NO userId and NO UID cookie — userid must come from card defaults.userid.
+	sess := `{"platform":"xuexitong","account":"u","cookies":"fid=1","extra":{}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"C1","classId":"CL1","workId":"W1","knowledgeId":1,"cpi":"9"},"options":{"action":"pullChapterTest"}}`
+	e := parseEnvelope(t, RunTask(sess, taskJSON))
+	if !e.OK {
+		t.Fatalf("pull with workId but missing tokens should fetch card and succeed: %s", e.Error)
+	}
+	if gotWorkId != "W1" || gotKToken != "K9" || gotEnc != "E9" {
+		t.Fatalf("card tokens not applied to fetch: work=%q ktoken=%q enc=%q", gotWorkId, gotKToken, gotEnc)
+	}
+	if gotUserId != "PU9" {
+		t.Fatalf("fetch userid should come from card defaults.userid, got %q", gotUserId)
+	}
+}
+
+// The empty-userid root cause: when the session lacks extra.userId, the paper fetch userid
+// must be recovered from the UID cookie (chaoxing returns a 信息提示 page without it).
+func TestRunTaskXuexitong_PullChapterTest_UserIdFromUIDCookie(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtChapterFetchProvider
+	var gotUserId string
+	xxtChapterFetchProvider = func(c *xxtmobile.XxtClient, _, _, _, _, _, _, _, _, _ string) (string, error) {
+		gotUserId = c.UserID
+		return xxtChapterPaperHTML, nil
+	}
+	defer func() { xxtChapterFetchProvider = orig }()
+
+	// No extra.userId; ktoken/enc present so the card is skipped — userid must come from UID cookie.
+	sess := `{"platform":"xuexitong","account":"u","cookies":"fid=1; UID=98765","extra":{}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"C1","classId":"CL1","workId":"W1","knowledgeId":1,"cpi":"9","ktoken":"KT1","enc":"EN1"},"options":{"action":"pullChapterTest"}}`
+	e := parseEnvelope(t, RunTask(sess, taskJSON))
+	if !e.OK {
+		t.Fatalf("pull should succeed: %s", e.Error)
+	}
+	if gotUserId != "98765" {
+		t.Fatalf("userid should be recovered from UID cookie, got %q", gotUserId)
+	}
+}
+
+// A fetch that returns a non-paper page (0 questions) must fail loudly, not proceed to an
+// empty submit that the server rejects.
+func TestRunTaskXuexitong_PullChapterTest_EmptyPageErrors(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtChapterFetch(`<div class="blankTips">无效的权限,code=2</div>`, nil)()
+
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"C1","classId":"CL1","workId":"W1","knowledgeId":1,"cpi":"9","ktoken":"KT1","enc":"EN1"},"options":{"action":"pullChapterTest"}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if e.OK {
+		t.Fatalf("pull must fail on a 0-question page, got OK; data=%v", e.Data)
+	}
+	if e.Error == "" {
+		t.Fatal("expected a descriptive error for the empty page")
 	}
 }
 
@@ -140,6 +213,28 @@ func TestRunTaskXuexitong_ChapterTestCaptcha(t *testing.T) {
 	}
 	if res.Raw["captchaImage"] != "BASE64IMG" {
 		t.Fatalf("captchaImage=%v", res.Raw["captchaImage"])
+	}
+}
+
+// A submit the server refuses ({"status":false}) must surface as a failed task, not a
+// false "submitted" — otherwise the host records 已提交 while the backend has nothing.
+func TestRunTaskXuexitong_ChapterTestRejected(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtChapterSubmitProvider
+	xxtChapterSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ChapterTestMeta, _ []xxtmobile.ChapterTestAnswer, _ bool) (string, error) {
+		return `{"status":false,"msg":"作业提交失败！"}`, nil
+	}
+	defer func() { xxtChapterSubmitProvider = orig }()
+
+	paper := `{"meta":{"courseId":"C1","classId":"CL1","workRelationId":"WR1"},"answers":[{"qid":"q1","typeCode":"0","answers":["3"]}]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"chapterTest","isSubmit":true,"paper":` + paper + `}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if e.OK {
+		t.Fatalf("chapterTest with server status=false must fail, got OK; data=%v", e.Data)
+	}
+	if e.Error == "" {
+		t.Fatal("rejected submit should carry an error message")
 	}
 }
 
