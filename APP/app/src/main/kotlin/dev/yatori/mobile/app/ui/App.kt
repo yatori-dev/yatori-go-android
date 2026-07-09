@@ -105,51 +105,52 @@ fun YatoriApp(
         )
     }
 
-    val showSecondary = nav.current != null
     val useFloating = themeState.floatingBar
 
     // Liquid-glass backdrop captures the tab content so the floating bar can refract it.
     val surfaceColor = MiuixTheme.colorScheme.surface
     val contentBackdrop = rememberLayerBackdrop { drawRect(surfaceColor); drawContent() }
-    val blurActive = useFloating && !showSecondary && themeState.blur && isRenderEffectSupported()
+    // Blur stays active regardless of navigation, so the floating glass bar keeps its frost
+    // through the whole cover / reveal transition (it is only ever hidden behind an opaque
+    // secondary screen, never blinked out). Costs some GPU while a secondary is open.
+    val blurActive = useFloating && themeState.blur && isRenderEffectSupported()
 
-    Scaffold(
-        bottomBar = {
-            // Conditionally rendered (NOT alpha=0) — secondary route → empty slot → zero layout/touch area.
-            if (!showSecondary) {
-                if (useFloating) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 12.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        FloatingBottomBar(
-                            selectedIndex = { nav.tab.ordinal },
-                            onSelected = { idx -> nav.selectTab(Tab.entries[idx]) },
-                            backdrop = contentBackdrop,
-                            tabsCount = Tab.entries.size,
-                            isBlurEnabled = blurActive,
-                            liquidGlass = themeState.liquidGlass,
-                        ) {
-                            FloatingTab(Icons.Rounded.Cottage, "主页") { nav.selectTab(Tab.HOME) }
-                            FloatingTab(Icons.Rounded.MenuBook, "课程") { nav.selectTab(Tab.COURSES) }
-                            FloatingTab(Icons.Rounded.Description, "日志") { nav.selectTab(Tab.LOGS) }
-                            FloatingTab(Icons.Rounded.Settings, "设置") { nav.selectTab(Tab.SETTINGS) }
-                        }
-                    }
-                } else {
-                    NavigationBar {
-                        NavigationBarItem(selected = nav.tab == Tab.HOME,     onClick = { nav.selectTab(Tab.HOME) },     icon = Icons.Rounded.Cottage,     label = "主页")
-                        NavigationBarItem(selected = nav.tab == Tab.COURSES,  onClick = { nav.selectTab(Tab.COURSES) },  icon = Icons.Rounded.MenuBook,    label = "课程")
-                        NavigationBarItem(selected = nav.tab == Tab.LOGS,     onClick = { nav.selectTab(Tab.LOGS) },     icon = Icons.Rounded.Description, label = "日志")
-                        NavigationBarItem(selected = nav.tab == Tab.SETTINGS, onClick = { nav.selectTab(Tab.SETTINGS) }, icon = Icons.Rounded.Settings,    label = "设置")
-                    }
+    // Bottom bar content, WITHOUT any secondary gate. It now lives inside the primary
+    // (tab) layer via a nested Scaffold, so a secondary screen sliding over it covers /
+    // reveals it smoothly, instead of the bar blinking out for the whole transition.
+    val bottomBarContent: @Composable () -> Unit = {
+        if (useFloating) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
+                contentAlignment = Alignment.Center,
+            ) {
+                FloatingBottomBar(
+                    selectedIndex = { nav.tab.ordinal },
+                    onSelected = { idx -> nav.selectTab(Tab.entries[idx]) },
+                    backdrop = contentBackdrop,
+                    tabsCount = Tab.entries.size,
+                    isBlurEnabled = blurActive,
+                    liquidGlass = themeState.liquidGlass,
+                ) {
+                    FloatingTab(Icons.Rounded.Cottage, "主页") { nav.selectTab(Tab.HOME) }
+                    FloatingTab(Icons.Rounded.MenuBook, "课程") { nav.selectTab(Tab.COURSES) }
+                    FloatingTab(Icons.Rounded.Description, "日志") { nav.selectTab(Tab.LOGS) }
+                    FloatingTab(Icons.Rounded.Settings, "设置") { nav.selectTab(Tab.SETTINGS) }
                 }
             }
-        },
-    ) { innerPadding ->
-        val bp = innerPadding.calculateBottomPadding()
+        } else {
+            NavigationBar {
+                NavigationBarItem(selected = nav.tab == Tab.HOME,     onClick = { nav.selectTab(Tab.HOME) },     icon = Icons.Rounded.Cottage,     label = "主页")
+                NavigationBarItem(selected = nav.tab == Tab.COURSES,  onClick = { nav.selectTab(Tab.COURSES) },  icon = Icons.Rounded.MenuBook,    label = "课程")
+                NavigationBarItem(selected = nav.tab == Tab.LOGS,     onClick = { nav.selectTab(Tab.LOGS) },     icon = Icons.Rounded.Description, label = "日志")
+                NavigationBarItem(selected = nav.tab == Tab.SETTINGS, onClick = { nav.selectTab(Tab.SETTINGS) }, icon = Icons.Rounded.Settings,    label = "设置")
+            }
+        }
+    }
+
+    Scaffold { _ ->
 
         val sysDensity = LocalDensity.current
         val scaledDensity = remember(sysDensity, themeState.uiScale) {
@@ -158,10 +159,7 @@ fun YatoriApp(
         }
 
         CompositionLocalProvider(LocalDensity provides scaledDensity) {
-            Box(
-                modifier = Modifier.fillMaxSize()
-                    .let { if (blurActive) it.layerBackdrop(contentBackdrop) else it },
-            ) {
+            Box(modifier = Modifier.fillMaxSize()) {
                 val animState by remember { derivedStateOf { nav.current to nav.stackSize } }
                 val transitionState = remember { SeekableTransitionState(animState) }
 
@@ -183,29 +181,39 @@ fun YatoriApp(
                     BackHandler(enabled = nav.canGoBack) { nav.pop() }
                 }
 
-                // Layer 1: Tabs are ALWAYS in composition — never unmounted.
-                // This prevents the ~1 s cold-start delay when returning from a secondary
-                // screen (previously the tab branch was inside AnimatedContent and had to be
-                // composed from scratch on every back-navigation).
-                Box(modifier = Modifier.fillMaxSize()) {
-                    Tab.entries.forEach { tab ->
-                        val isActive = tab == nav.tab
-                        val alpha = if (themeState.tabAnim == PageAnim.FADE) {
-                            animateFloatAsState(
-                                targetValue = if (isActive) 1f else 0f,
-                                animationSpec = tween(150),
-                                label = "tab_alpha_${tab.name}",
-                            ).value
-                        } else {
-                            if (isActive) 1f else 0f
-                        }
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .zIndex(if (isActive) 1f else 0f)
-                                .graphicsLayer { this.alpha = alpha },
-                        ) {
-                            tabContent[tab]?.invoke(bp, isActive)
+                // Layer 1: primary layer — the tab pages PLUS the bottom bar, via a nested
+                // Scaffold. Tabs are ALWAYS in composition (never unmounted) to avoid the
+                // ~1 s cold-start delay when returning from a secondary screen. The bar lives
+                // in this layer's bottomBar slot (not the outer Scaffold), so it is drawn
+                // BEHIND Layer 2 and gets covered / revealed together with the tab content as
+                // a secondary screen slides in / out — no more blinking out mid-transition.
+                Scaffold(bottomBar = bottomBarContent) { pad ->
+                    val bp = pad.calculateBottomPadding()
+                    // layerBackdrop captures ONLY the tab content (not the bar) so the
+                    // floating glass bar can refract it without sampling itself.
+                    Box(
+                        modifier = Modifier.fillMaxSize()
+                            .let { if (blurActive) it.layerBackdrop(contentBackdrop) else it },
+                    ) {
+                        Tab.entries.forEach { tab ->
+                            val isActive = tab == nav.tab
+                            val alpha = if (themeState.tabAnim == PageAnim.FADE) {
+                                animateFloatAsState(
+                                    targetValue = if (isActive) 1f else 0f,
+                                    animationSpec = tween(150),
+                                    label = "tab_alpha_${tab.name}",
+                                ).value
+                            } else {
+                                if (isActive) 1f else 0f
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .zIndex(if (isActive) 1f else 0f)
+                                    .graphicsLayer { this.alpha = alpha },
+                            ) {
+                                tabContent[tab]?.invoke(bp, isActive)
+                            }
                         }
                     }
                 }
