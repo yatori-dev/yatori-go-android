@@ -1745,6 +1745,7 @@ type xxtBbsPrepared struct {
 	ReplyWordNum   string
 	EndTime        string
 	IsJob          bool
+	IsJobKnown     bool
 	Topic          xxtmobile.BbsTopic
 	InfoResp       string
 	DetailResp     string
@@ -1754,6 +1755,12 @@ func xxtBbsPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	prepared, err := prepareXxtBbs(sess, input, true)
 	if err != nil {
 		return RunTaskResult{}, err
+	}
+	if prepared.IsJobKnown && !prepared.IsJob {
+		return RunTaskResult{
+			Platform: "xuexitong", TaskID: prepared.JobID, Status: "skipped",
+			Message: "bbs attachment is not an unfinished task point", Raw: xxtBbsRaw(prepared, false, ""),
+		}, nil
 	}
 	return RunTaskResult{
 		Platform: "xuexitong",
@@ -1765,13 +1772,19 @@ func xxtBbsPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
 }
 
 func xxtBbsSubmit(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	content := optString(input.Options["content"], optString(input.Options["answer"], optString(input.Options["reply"], "")))
-	if strings.TrimSpace(content) == "" {
-		return RunTaskResult{}, fmt.Errorf("xuexitong: action=bbs requires options.content/answer/reply from host")
-	}
 	prepared, err := prepareXxtBbs(sess, input, false)
 	if err != nil {
 		return RunTaskResult{}, err
+	}
+	if prepared.IsJobKnown && !prepared.IsJob {
+		return RunTaskResult{
+			Platform: "xuexitong", TaskID: prepared.JobID, Status: "skipped",
+			Message: "bbs attachment is not an unfinished task point", Raw: xxtBbsRaw(prepared, false, ""),
+		}, nil
+	}
+	content := optString(input.Options["content"], optString(input.Options["answer"], optString(input.Options["reply"], "")))
+	if strings.TrimSpace(content) == "" {
+		return RunTaskResult{}, fmt.Errorf("xuexitong: action=bbs requires options.content/answer/reply from host")
 	}
 	raw := xxtBbsRaw(prepared, false, "")
 	raw["content"] = content
@@ -1836,9 +1849,15 @@ func prepareXxtBbsBase(sess SessionData, input TaskInput, fetchTopic, fetchMissi
 		ReplyTimes:     strOf(input.Raw["replyTimes"]),
 		ReplyWordNum:   strOf(input.Raw["replyWordNum"]),
 		EndTime:        strOf(input.Raw["endTime"]),
-		IsJob:          optBool(input.Raw["isJob"], false),
 	}
-	if p.JobID == "" || p.Mid == "" {
+	if _, ok := input.Options["isJob"]; ok {
+		p.IsJob = optBool(input.Options["isJob"], false)
+		p.IsJobKnown = optBool(input.Options["isJobKnown"], true)
+	} else if _, ok := input.Raw["isJob"]; ok {
+		p.IsJob = optBool(input.Raw["isJob"], false)
+		p.IsJobKnown = optBool(input.Raw["isJobKnown"], true)
+	}
+	if p.JobID == "" || p.Mid == "" || !p.IsJobKnown {
 		c := xxtClient(sess)
 		cardHTML, err := xxtCardProvider(c, classId, courseId, knowledgeId, cpi)
 		if err != nil {
@@ -1884,12 +1903,19 @@ func prepareXxtBbsBase(sess SessionData, input TaskInput, fetchTopic, fetchMissi
 		if p.EndTime == "" {
 			p.EndTime = meta.EndTime
 		}
-		if !p.IsJob {
+		if meta.IsJobKnown {
 			p.IsJob = meta.IsJob
+			p.IsJobKnown = true
 		}
 	}
 	if p.JobID == "" || p.Mid == "" {
 		return xxtBbsPrepared{}, fmt.Errorf("xuexitong: taskJSON.raw.jobId and raw.mid are required for bbs")
+	}
+	if !p.IsJobKnown {
+		return xxtBbsPrepared{}, fmt.Errorf("xuexitong: bbs card did not expose task-point job flag")
+	}
+	if !p.IsJob {
+		return p, nil
 	}
 	topic := xxtmobile.BbsTopic{
 		Platform:  optString(input.Options["platform"], strOf(input.Raw["bbsPlatform"])),
@@ -1962,11 +1988,12 @@ func xxtBbsRaw(p xxtBbsPrepared, realSubmit bool, response string) map[string]in
 		"replyWordNum":    p.ReplyWordNum,
 		"endTime":         p.EndTime,
 		"isJob":           p.IsJob,
+		"isJobKnown":      p.IsJobKnown,
 		"topic":           p.Topic,
 		"prompt":          strings.TrimSpace(p.Topic.Title + "\n" + p.Topic.Content),
 		"answerSource":    "host",
 		"realSubmit":      realSubmit,
-		"requiresHostAI":  true,
+		"requiresHostAI":  p.IsJobKnown && p.IsJob,
 		"requiresHostOCR": false,
 	}
 	if p.InfoResp != "" {
@@ -2017,6 +2044,12 @@ func xxtBbsWebPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) 
 	if err != nil {
 		return RunTaskResult{}, err
 	}
+	if prepared.IsJobKnown && !prepared.IsJob {
+		return RunTaskResult{
+			Platform: "xuexitong", TaskID: prepared.JobID, Status: "skipped",
+			Message: "bbs attachment is not an unfinished task point", Raw: xxtBbsWebRaw(prepared, false, ""),
+		}, nil
+	}
 	return RunTaskResult{
 		Platform: "xuexitong",
 		TaskID:   prepared.JobID,
@@ -2027,16 +2060,22 @@ func xxtBbsWebPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) 
 }
 
 func xxtBbsWebSubmit(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	content := optString(input.Options["content"], optString(input.Options["answer"], optString(input.Options["reply"], "")))
-	if strings.TrimSpace(content) == "" {
-		return RunTaskResult{}, fmt.Errorf("xuexitong: action=bbsWeb requires options.content/answer/reply from host")
-	}
 	prepared, err := prepareXxtBbsWeb(sess, input, false)
 	if errors.Is(err, xxtmobile.ErrBbsCaptcha) {
 		return xxtBbsWebCaptcha(sess, input)
 	}
 	if err != nil {
 		return RunTaskResult{}, err
+	}
+	if prepared.IsJobKnown && !prepared.IsJob {
+		return RunTaskResult{
+			Platform: "xuexitong", TaskID: prepared.JobID, Status: "skipped",
+			Message: "bbs attachment is not an unfinished task point", Raw: xxtBbsWebRaw(prepared, false, ""),
+		}, nil
+	}
+	content := optString(input.Options["content"], optString(input.Options["answer"], optString(input.Options["reply"], "")))
+	if strings.TrimSpace(content) == "" {
+		return RunTaskResult{}, fmt.Errorf("xuexitong: action=bbsWeb requires options.content/answer/reply from host")
 	}
 	raw := xxtBbsWebRaw(prepared, false, "")
 	raw["content"] = content
@@ -2074,6 +2113,9 @@ func prepareXxtBbsWeb(sess SessionData, input TaskInput, fetchTopic bool) (xxtBb
 	p.Topic.BbsID = optString(input.Options["bbsId"], strOf(input.Raw["bbsId"]))
 	p.Topic.Title = optString(input.Options["topicTitle"], strOf(input.Raw["topicTitle"]))
 	p.Topic.Content = optString(input.Options["topicContent"], strOf(input.Raw["topicContent"]))
+	if p.IsJobKnown && !p.IsJob {
+		return p, nil
+	}
 	if !fetchTopic && p.Topic.TopicUUID != "" && p.Topic.URLToken != "" && p.Topic.BbsID != "" {
 		return p, nil
 	}

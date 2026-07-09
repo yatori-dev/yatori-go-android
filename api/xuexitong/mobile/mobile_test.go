@@ -308,8 +308,19 @@ func TestParseCardHTMLForBbsTask_FromAttachmentSetting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if meta.JobID != "bbs-job" || meta.Mid != "mid-1" || meta.Title != "BBS Title" || meta.Enc != "root-enc" || !meta.IsJob {
+	if meta.JobID != "bbs-job" || meta.Mid != "mid-1" || meta.Title != "BBS Title" || meta.Enc != "root-enc" || !meta.IsJob || !meta.IsJobKnown {
 		t.Fatalf("unexpected bbs meta: %+v", meta)
+	}
+}
+
+func TestParseCardHTMLForBbsTask_MissingJobFlagIsNonTask(t *testing.T) {
+	cardHTML := `<script>window.attachmentSetting = {"attachments":[{"type":"bbs","jobid":"bbs-job","property":{"module":"insertbbs","mid":"mid-1","jobid":"bbs-job"}}]};</script>`
+	meta, err := mobile.ParseCardHTMLForBbsTask(cardHTML, "bbs-job")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if meta.IsJob || !meta.IsJobKnown {
+		t.Fatalf("missing job flag must be treated as a known non-task point: %+v", meta)
 	}
 }
 
@@ -349,6 +360,24 @@ func TestPhoneBbsURLsAndParse(t *testing.T) {
 	ok, msg := mobile.ParseBbsSubmit(`{"result":0,"msg":"no"}`, "phone")
 	if ok || msg != "no" {
 		t.Fatalf("expected rejection, ok=%v msg=%q", ok, msg)
+	}
+	for _, tc := range []struct {
+		raw      string
+		platform string
+		wantMsg  string
+	}{
+		{`<html>login</html>`, "phone", "invalid JSON"},
+		{`{"msg":"ok"}`, "phone", "missing result"},
+		{`{"msg":"ok"}`, "web", "missing status"},
+	} {
+		ok, msg = mobile.ParseBbsSubmit(tc.raw, tc.platform)
+		if ok || !strings.Contains(msg, tc.wantMsg) {
+			t.Fatalf("unknown bbs response accepted: platform=%s raw=%s ok=%v msg=%q", tc.platform, tc.raw, ok, msg)
+		}
+	}
+	ok, msg = mobile.ParseBbsSubmit(`{"status":true,"msg":"ok"}`, "web")
+	if !ok || msg != "ok" {
+		t.Fatalf("web status=true should pass: ok=%v msg=%q", ok, msg)
 	}
 }
 

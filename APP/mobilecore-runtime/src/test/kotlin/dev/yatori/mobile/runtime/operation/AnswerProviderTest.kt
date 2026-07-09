@@ -165,6 +165,19 @@ class AnswerProviderTest {
     }
 
     @Test
+    fun `host ai bbs preserves every openai responses text chunk`() = runTest {
+        val http = FakeHttpClient(
+            """{"output":[{"content":[{"type":"output_text","text":"第一段"},{"type":"output_text","text":"，第二段"}]}]}""",
+        )
+        val provider = HostAiAnswerProvider(
+            settingProvider = { AiSetting(aiType = "OPENAI", model = "gpt-4.1-mini", apiKey = "sk-test") },
+            httpClient = http,
+        )
+
+        assertEquals("第一段，第二段", provider.bbs(request(question())))
+    }
+
+    @Test
     fun `host ai retries when answer is not json array`() = runTest {
         val http = FakeHttpClient(
             """{"choices":[{"message":{"content":"Option A"}}]}""",
@@ -189,6 +202,15 @@ class AnswerProviderTest {
         )
 
         assertEquals("讨论回复内容", provider.bbs(request(question())))
+    }
+
+    @Test
+    fun `default bbs provider joins all answer segments without truncation`() = runTest {
+        val provider = object : AnswerProvider {
+            override suspend fun answers(request: AnswerRequest): List<String> = listOf("第一段", "第二段")
+        }
+
+        assertEquals("第一段\n第二段", provider.bbs(request(question())))
     }
 
     private class FakeHttpClient(private vararg val responses: String) : AnswerHttpClient {

@@ -133,6 +133,7 @@ const xxtHyperlinkCardHTML = `<script>window.attachmentSetting = {"attachments":
 const xxtDocumentCardHTML = `<script>window.attachmentSetting = {"attachments":[{"type":"document","jtoken":"jt-doc","job":true,"property":{"name":"Doc Name","objectid":"obj-doc","jobid":"doc-job"}}]};</script>`
 const xxtLiveCardHTML = `<script>window.attachmentSetting = {"attachments":[{"type":"live","jobid":"live-job","aid":1001,"job":true,"property":{"module":"insertlive","title":"Live Title","userId":"u-live","liveId":6001,"streamName":"stream-1","vdoid":"vdo-1","live":true,"liveStatus":"回看","jobid":"live-job"}}]};</script>`
 const xxtBbsCardHTML = `<script>window.attachmentSetting = {"enc":"root-enc","attachments":[{"type":"bbs","jobid":"bbs-job","authEnc":"auth","otherInfo":"info","job":true,"property":{"module":"insertbbs","title":"BBS Title","detail":"Discuss","mid":"mid-1","jobid":"bbs-job","allowViewReply":1,"replytimes":"2","replywordnum":"20","endtime":"2026"}}]};</script>`
+const xxtBbsNonJobCardHTML = `<script>window.attachmentSetting = {"enc":"root-enc","attachments":[{"type":"bbs","jobid":"bbs-job","authEnc":"auth","otherInfo":"info","job":false,"property":{"module":"insertbbs","title":"Optional discussion","detail":"Discuss","mid":"mid-1","jobid":"bbs-job"}}]};</script>`
 const xxtBbsInfoHTML = `<input id="groupId" value="g1"><input id="bbsId" value="b1"><input id="topicId" value="topic-1"><script>classId:"2001";courseId:"9001";classChatId:"chat";role:"student";</script>`
 const xxtBbsDetailJSON = `{"data":{"title":"Topic Title","text_content":"Topic body","uuid":"topic-uuid"}}`
 const xxtBbsWebInfoHTML = `<script>var pageData={topic:{"uuid":"web-topic-uuid","bbsid":"web-bbs","title":"Web Topic","content":"Web body","id":99},course:{}}; var urlToken:'web-token';</script>`
@@ -722,11 +723,55 @@ func TestRunTaskXuexitong_BbsPrepare(t *testing.T) {
 	}
 }
 
+func TestRunTaskXuexitong_BbsPrepareSkipsNonTaskPoint(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtCard(xxtBbsNonJobCardHTML, nil)()
+	origInfo := xxtBbsInfoProvider
+	infoCalled := false
+	xxtBbsInfoProvider = func(_ *xxtmobile.XxtClient, _, _, _, _, _ string) (string, error) {
+		infoCalled = true
+		return "", errors.New("should not fetch topic for non-task bbs")
+	}
+	defer func() { xxtBbsInfoProvider = origInfo }()
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111},"options":{"action":"bbsPrepare"}}`
+	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("non-task bbs should be skipped cleanly: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "skipped" || res.Raw["isJob"] != false || res.Raw["isJobKnown"] != true || res.Raw["requiresHostAI"] != false {
+		t.Fatalf("unexpected non-task bbs result: %+v", res)
+	}
+	if infoCalled {
+		t.Fatal("non-task bbs must not fetch topic or generate a reply")
+	}
+}
+
+func TestRunTaskXuexitong_BbsUnknownSubmitResponseRejected(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtBbsAnswer(`{"unexpected":true}`, nil)()
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001","isJob":true,"isJobKnown":true},"options":{"action":"bbs","content":"host reply"}}`
+	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("unknown response should return a rejected result: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "rejected" || !strings.Contains(res.Message, "missing result") {
+		t.Fatalf("unknown response must not be accepted: %+v", res)
+	}
+}
+
 func TestRunTaskXuexitong_BbsDefaultSubmit(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	defer fakeXxtBbsAnswer(`{"result":1,"msg":"ok"}`, nil)()
-	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001"},"options":{"action":"bbs","content":"host reply"}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001","isJob":true,"isJobKnown":true},"options":{"action":"bbs","content":"host reply"}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("bbs submit should succeed: %s", e.Error)
@@ -742,7 +787,7 @@ func TestRunTaskXuexitong_BbsDefaultSubmit(t *testing.T) {
 func TestRunTaskXuexitong_BbsRequiresHostContent(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
-	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001"},"options":{"action":"bbs"}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001","isJob":true,"isJobKnown":true},"options":{"action":"bbs"}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
 	if e.OK {
 		t.Fatal("bbs without host content should fail")
@@ -753,7 +798,7 @@ func TestRunTaskXuexitong_BbsRejected(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	defer fakeXxtBbsAnswer(`{"result":0,"msg":"no"}`, nil)()
-	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001"},"options":{"action":"bbs","content":"host reply"}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","topicUUID":"topic-uuid","topicClassId":"2001","isJob":true,"isJobKnown":true},"options":{"action":"bbs","content":"host reply"}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("bbs rejected response should return result: %s", e.Error)
@@ -834,7 +879,7 @@ func TestRunTaskXuexitong_BbsWebDefaultSubmit(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	defer fakeXxtBbsWeb("", "", "", "", `{"status":true,"msg":"ok"}`, nil)()
-	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","enc":"enc-1","topicUUID":"web-topic-uuid","urlToken":"web-token","bbsId":"web-bbs"},"options":{"action":"bbsWeb","content":"host reply"}}`
+	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"bbs-job","mid":"mid-1","enc":"enc-1","topicUUID":"web-topic-uuid","urlToken":"web-token","bbsId":"web-bbs","isJob":true,"isJobKnown":true},"options":{"action":"bbsWeb","content":"host reply"}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("bbs web submit should succeed: %s", e.Error)

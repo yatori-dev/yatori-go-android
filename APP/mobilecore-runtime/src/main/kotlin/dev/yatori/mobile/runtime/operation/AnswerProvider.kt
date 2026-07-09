@@ -40,7 +40,8 @@ data class AnswerRequest(
 
 interface AnswerProvider {
     suspend fun answers(request: AnswerRequest): List<String>
-    suspend fun bbs(request: AnswerRequest): String = answers(request).firstOrNull().orEmpty()
+    suspend fun bbs(request: AnswerRequest): String =
+        answers(request).filter { it.isNotBlank() }.joinToString("\n")
 }
 
 class BuiltInXuexitongAnswerProvider(
@@ -338,6 +339,8 @@ class HostAiAnswerProvider(
                 message?.string("content") ?: choiceObj.string("text")
             }
         }
+        val outputText = obj.string("output_text")
+        if (outputText.isNotBlank()) return listOf(outputText)
         val outputTexts = mutableListOf<String>()
         obj.get("output")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { outputItem ->
             val outputObj = outputItem.asJsonObjectOrNull() ?: return@forEach
@@ -347,8 +350,10 @@ class HostAiAnswerProvider(
                 if (text.isNotBlank()) outputTexts.add(text)
             }
         }
-        return outputTexts + listOfNotNull(
-            obj.string("output_text").takeIf { it.isNotBlank() },
+        // Responses API may split one answer across multiple output_text content items.
+        // They are chunks of the same answer, not alternative choices, so preserve all of them.
+        if (outputTexts.isNotEmpty()) return listOf(outputTexts.joinToString(""))
+        return listOfNotNull(
             obj.string("answer").takeIf { it.isNotBlank() },
             obj.string("content").takeIf { it.isNotBlank() },
         )

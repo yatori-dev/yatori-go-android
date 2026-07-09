@@ -941,8 +941,25 @@ class CourseSyncManager(
         opId: String,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
-        val prepared = runTaskWithChallenge(session, task, mapOf("action" to "bbsPrepare"), onEvent)
+        suspend fun prepare(web: Boolean, sourceTask: TaskItem): RunTaskResult =
+            runTaskWithChallenge(
+                session,
+                sourceTask,
+                mapOf("action" to if (web) "bbsWebPrepare" else "bbsPrepare"),
+                onEvent,
+            )
+
+        var useWeb = false
+        var prepared = runCatching { prepare(web = false, sourceTask = task) }
+            .getOrElse { error ->
+                onEvent(SyncEvent("warn", "讨论手机端读取失败，回退网页端：${error.message}", session.platform))
+                useWeb = true
+                prepare(web = true, sourceTask = task)
+            }
+        if (prepared.status == "skipped") return prepared
+        if (prepared.status !in setOf("prepared", "ok")) return prepared
         if (controller.isCancelling(opId)) return prepared
+
         val prompt = JsonObject().apply {
             addProperty("content", jsonString(prepared.raw, "prompt").ifBlank { jsonString(prepared.raw, "title") })
             addProperty("title", jsonString(prepared.raw, "title"))
@@ -987,8 +1004,28 @@ class CourseSyncManager(
                 return prepared
             }
         }
-        val opts = prepared.raw.toMutableMap() + mapOf("action" to "bbs", "content" to answer, "realSubmit" to true)
-        return runTaskWithChallenge(session, task.copy(raw = prepared.raw), opts, onEvent)
+
+        suspend fun submit(web: Boolean, source: RunTaskResult): RunTaskResult {
+            val opts = source.raw.toMutableMap().apply {
+                put("action", if (web) "bbsWeb" else "bbs")
+                put("content", answer)
+                put("realSubmit", !plan.dryRun)
+                if (plan.dryRun) put("dryRun", true)
+            }
+            return runTaskWithChallenge(session, task.copy(raw = source.raw), opts, onEvent)
+        }
+
+        val firstSubmit = runCatching { submit(web = useWeb, source = prepared) }
+        if (useWeb || plan.dryRun) return firstSubmit.getOrThrow()
+        val phoneResult = firstSubmit.getOrNull()
+        if (phoneResult != null && phoneResult.status in setOf("submitted", "done")) return phoneResult
+
+        val fallbackReason = firstSubmit.exceptionOrNull()?.message ?: "status=${phoneResult?.status.orEmpty()}"
+        onEvent(SyncEvent("warn", "讨论手机端提交失败，回退网页端：$fallbackReason", session.platform))
+        val webPrepared = prepare(web = true, sourceTask = task.copy(raw = prepared.raw))
+        if (webPrepared.status == "skipped") return webPrepared
+        if (webPrepared.status !in setOf("prepared", "ok")) return webPrepared
+        return submit(web = true, source = webPrepared)
     }
 
     private suspend fun answersWithFallback(

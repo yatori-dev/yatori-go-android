@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ type BbsTaskMeta struct {
 	ReplyWordNum   string `json:"replyWordNum,omitempty"`
 	EndTime        string `json:"endTime,omitempty"`
 	IsJob          bool   `json:"isJob"`
+	IsJobKnown     bool   `json:"isJobKnown"`
 }
 
 type BbsTopic struct {
@@ -93,6 +95,14 @@ func parseBbsAttachmentJSON(raw, targetJobID string) (BbsTaskMeta, error) {
 		}
 		mid := firstNonEmptyString(jsonStr(m, "mid", "mtopid", "mtopicid"), jsonStr(property, "mid", "mtopid", "mtopicid"))
 		if jobID != "" && mid != "" {
+			isJob, isJobKnown := bbsBool(m, "job")
+			if !isJobKnown {
+				isJob, isJobKnown = bbsBool(property, "isJob")
+			}
+			// Console/Core treats a matching attachment without a job flag as a non-task point.
+			if !isJobKnown {
+				isJobKnown = true
+			}
 			return BbsTaskMeta{
 				JobID: jobID, Mid: mid,
 				Title:          jsonStr(property, "title", "name"),
@@ -105,11 +115,29 @@ func parseBbsAttachmentJSON(raw, targetJobID string) (BbsTaskMeta, error) {
 				ReplyTimes:     jsonStr(property, "replytimes"),
 				ReplyWordNum:   jsonStr(property, "replywordnum"),
 				EndTime:        jsonStr(property, "endtime"),
-				IsJob:          jsonBool(m, "job") || jsonBool(property, "isJob"),
+				IsJob:          isJob,
+				IsJobKnown:     isJobKnown,
 			}, nil
 		}
 	}
 	return BbsTaskMeta{}, fmt.Errorf("not found")
+}
+
+func bbsBool(m map[string]interface{}, key string) (bool, bool) {
+	switch v := m[key].(type) {
+	case bool:
+		return v, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1":
+			return true, true
+		case "false", "0":
+			return false, true
+		}
+	case float64:
+		return v != 0, true
+	}
+	return false, false
 }
 
 func PhoneBbsInfoURL(mid, jobID, knowledgeID, courseID, classID string) string {
@@ -257,19 +285,57 @@ func ParsePhoneBbsTopic(infoHTML, detailJSON string) (BbsTopic, error) {
 }
 
 func ParseBbsSubmit(raw string, platform string) (bool, string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false, "bbs submit returned an empty response"
+	}
 	var resp map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return true, ""
+	if err := json.Unmarshal([]byte(trimmed), &resp); err != nil {
+		return false, "bbs submit returned invalid JSON"
 	}
-	if platform == "phone" {
-		if result, ok := resp["result"].(float64); ok {
-			return int(result) == 1, jsonStr(resp, "msg", "message")
+	msg := jsonStr(resp, "msg", "message", "errorMsg")
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "phone":
+		result, ok := bbsResultInt(resp["result"])
+		if !ok {
+			return false, "bbs phone response missing result"
 		}
+		if result == 1 {
+			return true, msg
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("bbs phone result=%d", result)
+		}
+		return false, msg
+	case "web":
+		status, ok := resp["status"].(bool)
+		if !ok {
+			return false, "bbs web response missing status"
+		}
+		if status {
+			return true, msg
+		}
+		if msg == "" {
+			msg = "bbs web status=false"
+		}
+		return false, msg
+	default:
+		return false, "unsupported bbs submit platform"
 	}
-	if status, ok := resp["status"].(bool); ok {
-		return status, jsonStr(resp, "msg", "message")
+}
+
+func bbsResultInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		return i, err == nil
 	}
-	return true, ""
+	return 0, false
 }
 
 var ErrBbsCaptcha = errors.New("xuexitong: bbs web triggered captcha")
@@ -378,6 +444,9 @@ func (c *XxtClient) AnswerWebBbsApi(topicUUID, courseID, classID, content, urlTo
 	if err != nil {
 		return c.AnswerWebBbsApi(topicUUID, courseID, classID, content, urlToken, bbsID, retry-1, err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return c.AnswerWebBbsApi(topicUUID, courseID, classID, content, urlToken, bbsID, retry-1, fmt.Errorf("bbs web submit status code: %d", resp.StatusCode))
+	}
 	return string(bodyBytes), nil
 }
 
@@ -415,6 +484,9 @@ func (c *XxtClient) PullPhoneBbsDetailApi(topicID string, retry int, lastErr err
 	if err != nil {
 		return c.PullPhoneBbsDetailApi(topicID, retry-1, err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return c.PullPhoneBbsDetailApi(topicID, retry-1, fmt.Errorf("bbs phone detail status code: %d", resp.StatusCode))
+	}
 	return string(body), nil
 }
 
@@ -448,6 +520,9 @@ func (c *XxtClient) AnswerPhoneBbsApi(classID, topicUUID, content string, retry 
 	if err != nil {
 		return c.AnswerPhoneBbsApi(classID, topicUUID, content, retry-1, err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return c.AnswerPhoneBbsApi(classID, topicUUID, content, retry-1, fmt.Errorf("bbs phone submit status code: %d", resp.StatusCode))
+	}
 	return string(bodyBytes), nil
 }
 
@@ -476,6 +551,9 @@ func (c *XxtClient) bbsGet(urlStr, host string, retry int, lastErr error) (strin
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return c.bbsGet(urlStr, host, retry-1, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return c.bbsGet(urlStr, host, retry-1, fmt.Errorf("bbs GET status code: %d", resp.StatusCode))
 	}
 	return string(body), nil
 }

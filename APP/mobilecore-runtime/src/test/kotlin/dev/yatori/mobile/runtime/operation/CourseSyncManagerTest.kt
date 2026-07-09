@@ -429,6 +429,59 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `bbs phone prepare failure falls back to web and submits same full reply`() = runTest {
+        val runner = XuexitongBbsFallbackRunner(phonePrepareFails = true)
+        val provider = FakeAnswerProvider(listOf("第一段", "第二段"))
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            answerProviderFactory = AnswerProviderFactory { provider },
+        )
+        val events = mutableListOf<SyncEvent>()
+
+        val submitted = mgr.run(SessionData("xuexitong", "stu"), bbsPlan(), onEvent = { events.add(it) })
+
+        assertEquals(listOf("bbs-1"), submitted)
+        assertEquals(listOf("bbsPrepare", "bbsWebPrepare", "bbsWeb"), runner.actions)
+        assertEquals("第一段\n第二段", runner.submittedContent.single())
+        assertTrue(events.any { it.message.contains("回退网页端") })
+    }
+
+    @Test
+    fun `bbs phone rejected submit falls back to web`() = runTest {
+        val runner = XuexitongBbsFallbackRunner(phoneSubmitRejected = true)
+        val provider = FakeAnswerProvider(listOf("完整回复"))
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            answerProviderFactory = AnswerProviderFactory { provider },
+        )
+
+        mgr.run(SessionData("xuexitong", "stu"), bbsPlan())
+
+        assertEquals(listOf("bbsPrepare", "bbs", "bbsWebPrepare", "bbsWeb"), runner.actions)
+        assertEquals(listOf("完整回复", "完整回复"), runner.submittedContent)
+        assertEquals(1, provider.answerCalls)
+    }
+
+    @Test
+    fun `bbs non task point skips ai and submit`() = runTest {
+        val runner = XuexitongBbsFallbackRunner(nonTask = true)
+        val provider = FakeAnswerProvider(listOf("should not be used"))
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            answerProviderFactory = AnswerProviderFactory { provider },
+        )
+
+        mgr.run(SessionData("xuexitong", "stu"), bbsPlan())
+
+        assertEquals(listOf("bbsPrepare"), runner.actions)
+        assertEquals(0, provider.answerCalls)
+        assertTrue(runner.submittedContent.isEmpty())
+    }
+
+    @Test
     fun `autoExam host ai mode routes to host provider`() = runTest {
         val runner = XuexitongFallbackRunner()
         val host = FakeAnswerProvider(listOf("Host Answer"))
@@ -757,6 +810,68 @@ class CourseSyncManagerTest {
                 "knowledgeId" to 111,
                 *extra,
             )
+    }
+
+    private class XuexitongBbsFallbackRunner(
+        private val phonePrepareFails: Boolean = false,
+        private val phoneSubmitRejected: Boolean = false,
+        private val nonTask: Boolean = false,
+    ) : CourseTaskRunner {
+        val actions = mutableListOf<String>()
+        val submittedContent = mutableListOf<String>()
+        private val course = CourseItem("course-1", name = "Course", platform = "xuexitong", raw = ctx())
+        private val node = CourseItem("node-1", name = "Node", platform = "xuexitong", raw = ctx())
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(course)
+        override suspend fun getCourseDetail(session: SessionData, course: CourseItem): List<CourseItem> = listOf(node)
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> =
+            listOf(TaskItem("bbs-1", name = "BBS", type = "bbs", platform = "xuexitong", raw = ctx()))
+
+        override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>): RunTaskResult {
+            val action = options["action"] as? String ?: "none"
+            actions.add(action)
+            return when (action) {
+                "bbsPrepare" -> {
+                    if (phonePrepareFails) error("phone unavailable")
+                    if (nonTask) RunTaskResult("xuexitong", task.id, "skipped", raw = ctx("isJob" to false, "isJobKnown" to true))
+                    else RunTaskResult("xuexitong", task.id, "prepared", raw = preparedRaw("phone"))
+                }
+                "bbsWebPrepare" -> RunTaskResult("xuexitong", task.id, "prepared", raw = preparedRaw("web"))
+                "bbs" -> {
+                    submittedContent.add(options["content"] as String)
+                    if (phoneSubmitRejected) RunTaskResult("xuexitong", task.id, "rejected", "phone rejected")
+                    else RunTaskResult("xuexitong", task.id, "submitted")
+                }
+                "bbsWeb" -> {
+                    submittedContent.add(options["content"] as String)
+                    RunTaskResult("xuexitong", task.id, "submitted")
+                }
+                else -> RunTaskResult("xuexitong", task.id, "ok")
+            }
+        }
+
+        private fun preparedRaw(platform: String): JsonObject = ctx(
+            "prompt" to "Discussion title\nDiscussion content",
+            "title" to "Discussion title",
+            "detail" to "Discussion content",
+            "jobId" to "bbs-1",
+            "isJob" to true,
+            "isJobKnown" to true,
+            "topicUUID" to "topic-1",
+            "topicClassId" to "class-1",
+            "bbsPlatform" to platform,
+            "urlToken" to "token-1",
+            "bbsId" to "bbs-1",
+            "enc" to "enc-1",
+        )
+
+        private fun ctx(vararg extra: Pair<String, Any>): JsonObject = obj(
+            "classId" to "class-1",
+            "courseId" to "course-1",
+            "cpi" to "cpi-1",
+            "knowledgeId" to 111,
+            *extra,
+        )
     }
 
     private class HaiqikejiAnswerRunner(private val scope: String) : CourseTaskRunner {
