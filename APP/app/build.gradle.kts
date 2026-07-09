@@ -25,8 +25,8 @@ android {
         applicationId = "com.yatori.go.android"
         minSdk = 33   // upgraded: miuix-blur requires API 33 for RenderEffect blur
         targetSdk = 37
-        versionCode = 26070701
-        versionName = "1.1.2"
+        versionCode = 26071001
+        versionName = "1.2.2"
         if (selectedAbis.isNotEmpty()) {
             ndk {
                 abiFilters += selectedAbis
