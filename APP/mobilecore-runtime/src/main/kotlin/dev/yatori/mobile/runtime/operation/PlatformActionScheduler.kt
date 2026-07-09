@@ -57,6 +57,7 @@ data class EnaeaTickInput(
 data class XuexitongMediaTickInput(
     val progress: Int,
     val realSubmit: Boolean = true,
+    val isDrag: Int = 0,
 )
 
 data class YinghuaTickInput(
@@ -335,6 +336,7 @@ class PlatformActionScheduler(
             "progress" to input.progress,
             "currentTime" to input.progress,
             "realSubmit" to input.realSubmit,
+            "isdrag" to input.isDrag,
         )
         val result = repository.runTask(session, state.task, options)
         saveState(session, state.task, "xuexitong-audio", result, progress = input.progress.toDouble(), intervalSeconds = 58)
@@ -359,6 +361,7 @@ class PlatformActionScheduler(
             "progress" to input.progress,
             "currentTime" to input.progress,
             "realSubmit" to input.realSubmit,
+            "isdrag" to input.isDrag,
         )
         val result = repository.runTask(session, state.task, options)
         saveState(session, state.task, "xuexitong-video", result, progress = input.progress.toDouble(), intervalSeconds = 58)

@@ -139,6 +139,43 @@ func TestAudioSubmitStudyTimeURL(t *testing.T) {
 	}
 }
 
+func TestVideoSubmitStudyTimeURL_IncludesCardMetadata(t *testing.T) {
+	rawURL, enc := mobile.VideoSubmitStudyTimeURL(mobile.VideoSubmitParams{
+		ClassID:             "2001",
+		UserID:              "7001",
+		JobID:               "job-1",
+		ObjectID:            "obj-1",
+		CourseID:            "9001",
+		CPI:                 "1001",
+		DToken:              "token-1",
+		OtherInfo:           "nodeId_111-cpi_1001-enc_abc",
+		VideoFaceCaptureEnc: "face-enc",
+		AttDurationEnc:      "duration-enc",
+		PlayingTime:         58,
+		Duration:            300,
+		IsDrag:              3,
+		RT:                  1.25,
+		NowMillis:           12345,
+	})
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if u.Host != "mooc1.chaoxing.com" || u.Path != "/mooc-ans/multimedia/log/a/1001/token-1" {
+		t.Fatalf("unexpected endpoint: %s", rawURL)
+	}
+	q := u.Query()
+	if q.Get("userid") != "7001" || q.Get("isdrag") != "3" || q.Get("view") != "json" {
+		t.Fatalf("unexpected identity/start fields: %s", rawURL)
+	}
+	if q.Get("videoFaceCaptureEnc") != "face-enc" || q.Get("attDurationEnc") != "duration-enc" || q.Get("rt") != "1.25" {
+		t.Fatalf("card anti-cheat metadata missing: %s", rawURL)
+	}
+	if q.Get("enc") == "" || q.Get("enc") != enc || q.Get("clipTime") != "0_300" {
+		t.Fatalf("heartbeat signature mismatch: url=%q enc=%q", q.Get("enc"), enc)
+	}
+}
+
 func TestParseCardHTMLForHyperlinkTask_FromAttachmentSetting(t *testing.T) {
 	cardHTML := `<script>window.attachmentSetting = {"attachments":[{"jobid":"link-job","jtoken":"jt-1","property":{"title":"Link Title","jobid":"link-job"}}]};</script>`
 	meta, err := mobile.ParseCardHTMLForHyperlinkTask(cardHTML, "link-job", "")
@@ -395,6 +432,31 @@ func TestParseCardHTMLForVideoTask_Fallback(t *testing.T) {
 	}
 	if meta.JobID == "" {
 		t.Logf("jobId empty in fallback, acceptable for this HTML format")
+	}
+}
+
+func TestParseCardHTMLForVideoTask_ExtractsPlaybackAndAntiCheatMetadata(t *testing.T) {
+	cardHTML := `<script>window.AttachmentSetting = {"attachments":[{` +
+		`"type":"video","jobid":"vid-job","objectId":"obj-vid","otherInfo":"nodeId_1-cpi_2-enc_abc&courseId=9001",` +
+		`"mid":"mid-1","playTime":58000,"attDuration":300,"isPassed":false,"job":true,` +
+		`"attDurationEnc":"duration-enc","videoFaceCaptureEnc":"face-enc","randomCaptureTime":"120",` +
+		`"property":{"objectid":"obj-vid","module":"insertvideo","jobid":"vid-job","name":"Video title","rt":1.25}` +
+		`}],"defaults":{"fid":"1590","userid":"7001"}};</script>`
+	meta, err := mobile.ParseCardHTMLForVideoTask(cardHTML, "obj-vid")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if meta.JobID != "vid-job" || meta.ObjectID != "obj-vid" || meta.PUID != "7001" || meta.FID != 1590 {
+		t.Fatalf("identity metadata mismatch: %+v", meta)
+	}
+	if meta.PlayTime != 58 || meta.AttDuration != 300 || meta.RT != 1.25 || meta.Title != "Video title" || meta.Mid != "mid-1" {
+		t.Fatalf("playback metadata mismatch: %+v", meta)
+	}
+	if meta.AttDurationEnc != "duration-enc" || meta.VideoFaceCaptureEnc != "face-enc" || meta.RandomCaptureTime != "120" {
+		t.Fatalf("anti-cheat metadata mismatch: %+v", meta)
+	}
+	if !meta.IsPassedKnown || meta.IsPassed || !meta.IsJobKnown || !meta.IsJob {
+		t.Fatalf("completion/job flags mismatch: %+v", meta)
 	}
 }
 

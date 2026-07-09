@@ -65,11 +65,8 @@ var xxtVideoDtoProvider = func(c *xxtmobile.XxtClient, objectID string, fid int)
 	return c.FetchVideoDtoApi(objectID, fid, 3, nil)
 }
 
-var xxtSubmitStudyProvider = func(c *xxtmobile.XxtClient,
-	classID, userID, jobID, objectID, courseID, cpi, dtoken, otherInfo string,
-	playingTime, duration int,
-) (string, error) {
-	return c.VideoSubmitStudyTimeApi(classID, userID, jobID, objectID, courseID, cpi, dtoken, otherInfo, playingTime, duration, 0, 3, nil)
+var xxtSubmitStudyProvider = func(c *xxtmobile.XxtClient, p xxtmobile.VideoSubmitParams) (string, error) {
+	return c.VideoSubmitStudyTimeWithMetaApi(p, 3, nil)
 }
 
 var xxtAudioSubmitProvider = func(c *xxtmobile.XxtClient,
@@ -785,68 +782,86 @@ func runTaskXuexitong(sess SessionData, input TaskInput) (RunTaskResult, error) 
 		}, nil
 	}
 
-	prepared, err := prepareXxtVideo(sess, input)
+	prepared, err := prepareXxtMedia(sess, input, "video")
 	if err != nil {
 		return RunTaskResult{}, err
 	}
-
-	// Step 3: submit study time (play to completion)
-	playingTime := prepared.Duration
-	if playingTime <= 0 {
-		playingTime = 1
+	if prepared.IsPassedKnown && prepared.IsPassed {
+		return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: "done", Raw: xxtMediaRaw(prepared, "video", prepared.PlayTime, prepared.PlayTime >= prepared.Duration)}, nil
 	}
+
+	// Legacy one-shot callers submit the end position once. The result remains "progress"
+	// unless the server explicitly confirms isPassed=true; Android uses prepare/tick instead.
+	playingTime := prepared.Duration
 	c := xxtClient(sess)
-	submitRaw, err := xxtSubmitStudyProvider(c, prepared.ClassID, prepared.UserID, prepared.JobID, prepared.ObjectID, prepared.CourseID, prepared.CPI, prepared.DToken, prepared.OtherInfo, playingTime, prepared.Duration)
+	submitRaw, err := xxtSubmitStudyProvider(c, xxtmobile.VideoSubmitParams{
+		ClassID: prepared.ClassID, UserID: prepared.UserID, JobID: prepared.JobID,
+		ObjectID: prepared.ObjectID, CourseID: prepared.CourseID, CPI: prepared.CPI,
+		DToken: prepared.DToken, OtherInfo: prepared.OtherInfo,
+		VideoFaceCaptureEnc: prepared.VideoFaceCaptureEnc, AttDurationEnc: prepared.AttDurationEnc,
+		PlayingTime: playingTime, Duration: prepared.Duration, IsDrag: 0, RT: prepared.RT,
+	})
 	if err != nil {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: submit study time failed: %w", err)
 	}
-
-	// parse submit response: {"result":1} or {"result":0,"msg":"..."}
-	var submitResp struct {
-		Result int    `json:"result"`
-		Msg    string `json:"msg"`
-	}
-	if jsonErr := json.Unmarshal([]byte(submitRaw), &submitResp); jsonErr == nil && submitResp.Result != 1 {
-		return RunTaskResult{}, fmt.Errorf("xuexitong: submit failed: %s", submitRaw)
-	}
-
-	return RunTaskResult{
-		Platform: "xuexitong",
-		TaskID:   prepared.ObjectID,
-		Status:   "submitted",
-		Message:  fmt.Sprintf("duration=%d", prepared.Duration),
-	}, nil
-}
-
-type xxtVideoPrepared struct {
-	ObjectID    string
-	CourseID    string
-	ClassID     string
-	CPI         string
-	KnowledgeID string
-	UserID      string
-	JobID       string
-	OtherInfo   string
-	DToken      string
-	Duration    int
-}
-
-func xxtVideoPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	prepared, err := prepareXxtVideo(sess, input)
+	result, err := xxtParseMediaSubmit(submitRaw)
 	if err != nil {
 		return RunTaskResult{}, err
 	}
+	prepared.IsPassed = result.IsPassed
+	prepared.IsPassedKnown = true
+	raw := xxtMediaRaw(prepared, "video", playingTime, true)
+	raw["realSubmit"] = true
+	raw["response"] = submitRaw
+	status := "progress"
+	if result.IsPassed {
+		status = "done"
+	}
+	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: status, Raw: raw}, nil
+}
+
+type xxtMediaPrepared struct {
+	ObjectID            string
+	CourseID            string
+	ClassID             string
+	CPI                 string
+	KnowledgeID         string
+	UserID              string
+	JobID               string
+	OtherInfo           string
+	DToken              string
+	Title               string
+	Mid                 string
+	AttDurationEnc      string
+	VideoFaceCaptureEnc string
+	RandomCaptureTime   string
+	FID                 int
+	Duration            int
+	PlayTime            int
+	RT                  float64
+	IsPassed            bool
+	IsPassedKnown       bool
+	IsJob               bool
+	IsJobKnown          bool
+}
+
+func xxtVideoPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
+	prepared, err := prepareXxtMedia(sess, input, "video")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
+	status := xxtMediaPreparedStatus(prepared)
 	return RunTaskResult{
 		Platform: "xuexitong",
 		TaskID:   prepared.ObjectID,
-		Status:   "prepared",
-		Message:  "video ticker prepared; host should call action=videoTick every 58s",
-		Raw:      xxtVideoRaw(prepared, 0, false),
+		Status:   status,
+		Message:  "video prepared; host should submit a start heartbeat then timed progress heartbeats",
+		Raw:      xxtMediaRaw(prepared, "video", prepared.PlayTime, prepared.Duration > 0 && prepared.PlayTime >= prepared.Duration),
 	}, nil
 }
 
 func xxtVideoTick(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	prepared, err := prepareXxtVideo(sess, input)
+	prepared, err := prepareXxtMedia(sess, input, "video")
 	if err != nil {
 		return RunTaskResult{}, err
 	}
@@ -854,154 +869,63 @@ func xxtVideoTick(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if playingTime > prepared.Duration && prepared.Duration > 0 {
 		playingTime = prepared.Duration
 	}
-	finish := prepared.Duration > 0 && playingTime >= prepared.Duration
-	raw := xxtVideoRaw(prepared, playingTime, finish)
+	reachedEnd := prepared.Duration > 0 && playingTime >= prepared.Duration
+	raw := xxtMediaRaw(prepared, "video", playingTime, reachedEnd)
 	raw["realSubmit"] = false
 	if !xxtShouldSubmit(input, true) {
-		return RunTaskResult{
-			Platform: "xuexitong",
-			TaskID:   prepared.ObjectID,
-			Status:   "dry_run",
-			Message:  "xuexitong video dry-run",
-			Raw:      raw,
-		}, nil
+		return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: "dry_run", Message: "xuexitong video dry-run", Raw: raw}, nil
 	}
 	if !xxtProgressProvided(input) {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: action=videoTick realSubmit requires options.playingTime/progress/currentTime")
 	}
+	isdrag := optInt(input.Options["isdrag"], 0)
 	c := xxtClient(sess)
-	resp, err := xxtSubmitStudyProvider(c, prepared.ClassID, prepared.UserID, prepared.JobID, prepared.ObjectID, prepared.CourseID, prepared.CPI, prepared.DToken, prepared.OtherInfo, playingTime, prepared.Duration)
+	resp, err := xxtSubmitStudyProvider(c, xxtmobile.VideoSubmitParams{
+		ClassID: prepared.ClassID, UserID: prepared.UserID, JobID: prepared.JobID,
+		ObjectID: prepared.ObjectID, CourseID: prepared.CourseID, CPI: prepared.CPI,
+		DToken: prepared.DToken, OtherInfo: prepared.OtherInfo,
+		VideoFaceCaptureEnc: prepared.VideoFaceCaptureEnc, AttDurationEnc: prepared.AttDurationEnc,
+		PlayingTime: playingTime, Duration: prepared.Duration, IsDrag: isdrag, RT: prepared.RT,
+	})
 	if err != nil {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: video submit failed: %w", err)
 	}
-	if err := xxtParseMediaSubmit(resp); err != nil {
-		return RunTaskResult{}, err
-	}
-	raw["realSubmit"] = true
-	raw["response"] = resp
-	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: "submitted", Raw: raw}, nil
-}
-
-func prepareXxtVideo(sess SessionData, input TaskInput) (xxtVideoPrepared, error) {
-	objectID := input.ID
-	if objectID == "" {
-		objectID = strOf(input.Raw["objectId"])
-	}
-	courseId := strOf(input.Raw["courseId"])
-	classId := strOf(input.Raw["classId"])
-	cpi := strOf(input.Raw["cpi"])
-	knowledgeId := numToStr(input.Raw["knowledgeId"])
-	for field, val := range map[string]string{
-		"objectId": objectID, "courseId": courseId, "classId": classId, "cpi": cpi, "knowledgeId": knowledgeId,
-	} {
-		if val == "" {
-			return xxtVideoPrepared{}, fmt.Errorf("xuexitong: taskJSON.raw.%s is required for video", field)
-		}
-	}
-	userID := strOf(input.Raw["userId"])
-	if userID == "" {
-		userID = strOf(sess.Extra["userId"])
-	}
-	if userID == "" {
-		userID = xxtClient(sess).UserID
-	}
-	jobID := strOf(input.Raw["jobId"])
-	otherInfo := strOf(input.Raw["otherInfo"])
-	dtoken := strOf(input.Raw["dtoken"])
-	duration := optInt(input.Raw["duration"], 0)
-	c := xxtClient(sess)
-	if jobID == "" || otherInfo == "" {
-		cardHTML, err := xxtCardProvider(c, classId, courseId, knowledgeId, cpi)
-		if err != nil {
-			return xxtVideoPrepared{}, fmt.Errorf("xuexitong: video card fetch failed: %w", err)
-		}
-		meta, err := xxtmobile.ParseCardHTMLForVideoTask(cardHTML, objectID)
-		if err != nil {
-			return xxtVideoPrepared{}, fmt.Errorf("xuexitong: video card parse failed: %w", err)
-		}
-		if jobID == "" {
-			jobID = meta.JobID
-		}
-		if otherInfo == "" {
-			otherInfo = meta.OtherInfo
-		}
-	}
-	if dtoken == "" || duration <= 0 {
-		fid := xxtIntParam(input.Raw, "classId")
-		if fid == 0 {
-			fid, _ = strconv.Atoi(classId)
-		}
-		dtoRaw, err := xxtVideoDtoProvider(c, objectID, fid)
-		if err != nil {
-			return xxtVideoPrepared{}, fmt.Errorf("xuexitong: video dto fetch failed: %w", err)
-		}
-		dto, err := xxtmobile.ParseVideoDtoMeta(dtoRaw)
-		if err != nil {
-			return xxtVideoPrepared{}, fmt.Errorf("xuexitong: video dto parse failed: %w", err)
-		}
-		if dtoken == "" {
-			dtoken = dto.DToken
-		}
-		if duration <= 0 {
-			duration = dto.Duration
-		}
-	}
-	if jobID == "" {
-		return xxtVideoPrepared{}, fmt.Errorf("xuexitong: card HTML missing jobId")
-	}
-	return xxtVideoPrepared{
-		ObjectID: objectID, CourseID: courseId, ClassID: classId, CPI: cpi, KnowledgeID: knowledgeId,
-		UserID: userID, JobID: jobID, OtherInfo: otherInfo, DToken: dtoken, Duration: duration,
-	}, nil
-}
-
-func xxtVideoRaw(p xxtVideoPrepared, playingTime int, finish bool) map[string]interface{} {
-	return map[string]interface{}{
-		"submitMode":      "video",
-		"intervalSeconds": 58,
-		"objectId":        p.ObjectID,
-		"courseId":        p.CourseID,
-		"classId":         p.ClassID,
-		"cpi":             p.CPI,
-		"knowledgeId":     p.KnowledgeID,
-		"userId":          p.UserID,
-		"jobId":           p.JobID,
-		"otherInfo":       p.OtherInfo,
-		"dtoken":          p.DToken,
-		"duration":        p.Duration,
-		"playingTime":     playingTime,
-		"isFinish":        finish,
-	}
-}
-
-type xxtAudioPrepared struct {
-	ObjectID    string
-	CourseID    string
-	ClassID     string
-	CPI         string
-	KnowledgeID string
-	UserID      string
-	JobID       string
-	OtherInfo   string
-	Duration    int
-}
-
-func xxtAudioPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	prepared, err := prepareXxtAudio(sess, input)
+	result, err := xxtParseMediaSubmit(resp)
 	if err != nil {
 		return RunTaskResult{}, err
 	}
+	prepared.IsPassed = result.IsPassed
+	prepared.IsPassedKnown = true
+	raw = xxtMediaRaw(prepared, "video", playingTime, reachedEnd)
+	raw["realSubmit"] = true
+	raw["response"] = resp
+	if result.OutTimeMsg != "" {
+		raw["outTimeMsg"] = result.OutTimeMsg
+	}
+	status := "progress"
+	if result.IsPassed {
+		status = "done"
+	}
+	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: status, Raw: raw}, nil
+}
+
+func xxtAudioPrepare(sess SessionData, input TaskInput) (RunTaskResult, error) {
+	prepared, err := prepareXxtMedia(sess, input, "audio")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
+	status := xxtMediaPreparedStatus(prepared)
 	return RunTaskResult{
 		Platform: "xuexitong",
 		TaskID:   prepared.ObjectID,
-		Status:   "prepared",
-		Message:  "audio ticker prepared; host should call action=audioTick every 58s",
-		Raw:      xxtAudioRaw(prepared, 0, false),
+		Status:   status,
+		Message:  "audio prepared; host should submit a start heartbeat then timed progress heartbeats",
+		Raw:      xxtMediaRaw(prepared, "audio", prepared.PlayTime, prepared.Duration > 0 && prepared.PlayTime >= prepared.Duration),
 	}, nil
 }
 
 func xxtAudioTick(sess SessionData, input TaskInput) (RunTaskResult, error) {
-	prepared, err := prepareXxtAudio(sess, input)
+	prepared, err := prepareXxtMedia(sess, input, "audio")
 	if err != nil {
 		return RunTaskResult{}, err
 	}
@@ -1009,17 +933,11 @@ func xxtAudioTick(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if playingTime > prepared.Duration && prepared.Duration > 0 {
 		playingTime = prepared.Duration
 	}
-	finish := prepared.Duration > 0 && playingTime >= prepared.Duration
-	raw := xxtAudioRaw(prepared, playingTime, finish)
+	reachedEnd := prepared.Duration > 0 && playingTime >= prepared.Duration
+	raw := xxtMediaRaw(prepared, "audio", playingTime, reachedEnd)
 	raw["realSubmit"] = false
 	if !xxtShouldSubmit(input, true) {
-		return RunTaskResult{
-			Platform: "xuexitong",
-			TaskID:   prepared.ObjectID,
-			Status:   "dry_run",
-			Message:  "xuexitong audio dry-run",
-			Raw:      raw,
-		}, nil
+		return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: "dry_run", Message: "xuexitong audio dry-run", Raw: raw}, nil
 	}
 	if !xxtProgressProvided(input) {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: action=audioTick realSubmit requires options.playingTime/progress/currentTime")
@@ -1030,94 +948,216 @@ func xxtAudioTick(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if err != nil {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: audio submit failed: %w", err)
 	}
-	if err := xxtParseMediaSubmit(resp); err != nil {
+	result, err := xxtParseMediaSubmit(resp)
+	if err != nil {
 		return RunTaskResult{}, err
 	}
+	prepared.IsPassed = result.IsPassed
+	prepared.IsPassedKnown = true
+	raw = xxtMediaRaw(prepared, "audio", playingTime, reachedEnd)
 	raw["realSubmit"] = true
 	raw["response"] = resp
-	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: "submitted", Raw: raw}, nil
+	if result.OutTimeMsg != "" {
+		raw["outTimeMsg"] = result.OutTimeMsg
+	}
+	status := "progress"
+	if result.IsPassed {
+		status = "done"
+	}
+	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.ObjectID, Status: status, Raw: raw}, nil
 }
 
-func prepareXxtAudio(sess SessionData, input TaskInput) (xxtAudioPrepared, error) {
+func prepareXxtMedia(sess SessionData, input TaskInput, kind string) (xxtMediaPrepared, error) {
 	objectID := input.ID
 	if objectID == "" {
 		objectID = strOf(input.Raw["objectId"])
 	}
-	courseId := strOf(input.Raw["courseId"])
-	classId := strOf(input.Raw["classId"])
+	courseID := strOf(input.Raw["courseId"])
+	classID := strOf(input.Raw["classId"])
 	cpi := strOf(input.Raw["cpi"])
-	knowledgeId := numToStr(input.Raw["knowledgeId"])
+	knowledgeID := numToStr(input.Raw["knowledgeId"])
 	for field, val := range map[string]string{
-		"objectId": objectID, "courseId": courseId, "classId": classId, "cpi": cpi, "knowledgeId": knowledgeId,
+		"objectId": objectID, "courseId": courseID, "classId": classID, "cpi": cpi, "knowledgeId": knowledgeID,
 	} {
 		if val == "" {
-			return xxtAudioPrepared{}, fmt.Errorf("xuexitong: taskJSON.raw.%s is required for audio", field)
+			return xxtMediaPrepared{}, fmt.Errorf("xuexitong: taskJSON.raw.%s is required for %s", field, kind)
 		}
 	}
-	userID := strOf(input.Raw["userId"])
-	if userID == "" {
-		userID = strOf(sess.Extra["userId"])
+
+	p := xxtMediaPrepared{
+		ObjectID: objectID, CourseID: courseID, ClassID: classID, CPI: cpi, KnowledgeID: knowledgeID,
+		UserID: strOf(input.Raw["userId"]), JobID: strOf(input.Raw["jobId"]), OtherInfo: strOf(input.Raw["otherInfo"]),
+		DToken: strOf(input.Raw["dtoken"]), Title: strOf(input.Raw["title"]), Mid: strOf(input.Raw["mid"]),
+		AttDurationEnc: strOf(input.Raw["attDurationEnc"]), VideoFaceCaptureEnc: strOf(input.Raw["videoFaceCaptureEnc"]),
+		RandomCaptureTime: strOf(input.Raw["randomCaptureTime"]), FID: xxtIntParam(input.Raw, "fid"),
+		Duration: optInt(input.Raw["duration"], 0), PlayTime: optInt(input.Raw["playingTime"], optInt(input.Raw["playTime"], 0)),
+		RT: optFloatDefault(input.Raw["rt"], 0.9),
 	}
-	if userID == "" {
-		userID = xxtClient(sess).UserID
+	if _, ok := input.Raw["isPassed"]; ok {
+		p.IsPassed = optBool(input.Raw["isPassed"], false)
+		p.IsPassedKnown = optBool(input.Raw["isPassedKnown"], true)
 	}
-	jobID := strOf(input.Raw["jobId"])
-	otherInfo := strOf(input.Raw["otherInfo"])
-	duration := optInt(input.Raw["duration"], 0)
-	c := xxtClient(sess)
-	if jobID == "" || otherInfo == "" {
-		cardHTML, err := xxtCardProvider(c, classId, courseId, knowledgeId, cpi)
+	if _, ok := input.Raw["isJob"]; ok {
+		p.IsJob = optBool(input.Raw["isJob"], false)
+		p.IsJobKnown = optBool(input.Raw["isJobKnown"], true)
+	}
+	if p.UserID == "" {
+		p.UserID = strOf(sess.Extra["userId"])
+	}
+	if p.UserID == "" {
+		p.UserID = xxtClient(sess).UserID
+	}
+
+	action := strOf(input.Options["action"])
+	if p.JobID == "" || p.OtherInfo == "" || action == kind+"Prepare" {
+		c := xxtClient(sess)
+		cardHTML, err := xxtCardProvider(c, classID, courseID, knowledgeID, cpi)
 		if err != nil {
-			return xxtAudioPrepared{}, fmt.Errorf("xuexitong: audio card fetch failed: %w", err)
+			return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s card fetch failed: %w", kind, err)
 		}
 		meta, err := xxtmobile.ParseCardHTMLForVideoTask(cardHTML, objectID)
 		if err != nil {
-			return xxtAudioPrepared{}, fmt.Errorf("xuexitong: audio card parse failed: %w", err)
+			return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s card parse failed: %w", kind, err)
 		}
-		if jobID == "" {
-			jobID = meta.JobID
+		if p.JobID == "" {
+			p.JobID = meta.JobID
 		}
-		if otherInfo == "" {
-			otherInfo = meta.OtherInfo
+		if p.ObjectID == "" {
+			p.ObjectID = meta.ObjectID
+		}
+		if p.OtherInfo == "" {
+			p.OtherInfo = meta.OtherInfo
+		}
+		if p.UserID == "" {
+			p.UserID = meta.PUID
+		}
+		if meta.FID > 0 {
+			p.FID = meta.FID
+		}
+		if p.Title == "" {
+			p.Title = meta.Title
+		}
+		if p.Mid == "" {
+			p.Mid = meta.Mid
+		}
+		if p.AttDurationEnc == "" {
+			p.AttDurationEnc = meta.AttDurationEnc
+		}
+		if p.VideoFaceCaptureEnc == "" {
+			p.VideoFaceCaptureEnc = meta.VideoFaceCaptureEnc
+		}
+		if p.RandomCaptureTime == "" {
+			p.RandomCaptureTime = meta.RandomCaptureTime
+		}
+		if meta.PlayTime > 0 || p.PlayTime == 0 {
+			p.PlayTime = meta.PlayTime
+		}
+		if meta.AttDuration > 0 && p.Duration <= 0 {
+			p.Duration = meta.AttDuration
+		}
+		if meta.RT > 0 {
+			p.RT = meta.RT
+		}
+		if meta.IsPassedKnown {
+			p.IsPassed = meta.IsPassed
+			p.IsPassedKnown = true
+		}
+		if meta.IsJobKnown {
+			p.IsJob = meta.IsJob
+			p.IsJobKnown = true
 		}
 	}
-	if duration <= 0 {
-		fid := xxtIntParam(input.Raw, "classId")
+
+	needDTO := p.Duration <= 0 || (kind == "video" && p.DToken == "")
+	if needDTO {
+		fid := p.FID
 		if fid == 0 {
-			fid, _ = strconv.Atoi(classId)
+			// Legacy fallback for callers that bypass videoPrepare; real card flows use defaults.fid.
+			fid, _ = strconv.Atoi(classID)
 		}
-		dtoRaw, err := xxtVideoDtoProvider(c, objectID, fid)
+		c := xxtClient(sess)
+		dtoRaw, err := xxtVideoDtoProvider(c, p.ObjectID, fid)
 		if err != nil {
-			return xxtAudioPrepared{}, fmt.Errorf("xuexitong: audio dto fetch failed: %w", err)
+			return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s dto fetch failed: %w", kind, err)
 		}
 		dto, err := xxtmobile.ParseVideoDtoMeta(dtoRaw)
 		if err != nil {
-			return xxtAudioPrepared{}, fmt.Errorf("xuexitong: audio dto parse failed: %w", err)
+			return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s dto parse failed: %w", kind, err)
 		}
-		duration = dto.Duration
+		if p.DToken == "" {
+			p.DToken = dto.DToken
+		}
+		if p.Duration <= 0 {
+			p.Duration = dto.Duration
+		}
 	}
-	return xxtAudioPrepared{
-		ObjectID: objectID, CourseID: courseId, ClassID: classId, CPI: cpi, KnowledgeID: knowledgeId,
-		UserID: userID, JobID: jobID, OtherInfo: otherInfo, Duration: duration,
-	}, nil
+	if p.JobID == "" {
+		return xxtMediaPrepared{}, fmt.Errorf("xuexitong: card HTML missing jobId")
+	}
+	if p.UserID == "" {
+		return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s userid is required", kind)
+	}
+	if p.Duration <= 0 {
+		return xxtMediaPrepared{}, fmt.Errorf("xuexitong: %s duration is invalid", kind)
+	}
+	if kind == "video" && p.DToken == "" {
+		return xxtMediaPrepared{}, fmt.Errorf("xuexitong: video dtoken is required")
+	}
+	if p.RT <= 0 {
+		p.RT = 0.9
+	}
+	return p, nil
 }
 
-func xxtAudioRaw(p xxtAudioPrepared, playingTime int, finish bool) map[string]interface{} {
-	return map[string]interface{}{
-		"submitMode":      "audio",
-		"intervalSeconds": 58,
-		"objectId":        p.ObjectID,
-		"courseId":        p.CourseID,
-		"classId":         p.ClassID,
-		"cpi":             p.CPI,
-		"knowledgeId":     p.KnowledgeID,
-		"userId":          p.UserID,
-		"jobId":           p.JobID,
-		"otherInfo":       p.OtherInfo,
-		"duration":        p.Duration,
-		"playingTime":     playingTime,
-		"isFinish":        finish,
+func xxtMediaPreparedStatus(p xxtMediaPrepared) string {
+	if p.IsPassedKnown && p.IsPassed {
+		return "done"
 	}
+	if p.IsJobKnown && !p.IsJob {
+		return "skipped"
+	}
+	return "prepared"
+}
+
+func xxtMediaRaw(p xxtMediaPrepared, mode string, playingTime int, reachedEnd bool) map[string]interface{} {
+	raw := map[string]interface{}{
+		"submitMode": mode, "intervalSeconds": 58,
+		"objectId": p.ObjectID, "courseId": p.CourseID, "classId": p.ClassID, "cpi": p.CPI,
+		"knowledgeId": p.KnowledgeID, "userId": p.UserID, "jobId": p.JobID, "otherInfo": p.OtherInfo,
+		"duration": p.Duration, "playingTime": playingTime, "reachedEnd": reachedEnd,
+		"isPassed": p.IsPassed, "isPassedKnown": p.IsPassedKnown, "isFinish": p.IsPassedKnown && p.IsPassed,
+		"isJob": p.IsJob, "isJobKnown": p.IsJobKnown, "fid": p.FID, "rt": p.RT,
+		"title": p.Title, "mid": p.Mid, "attDurationEnc": p.AttDurationEnc,
+		"videoFaceCaptureEnc": p.VideoFaceCaptureEnc, "randomCaptureTime": p.RandomCaptureTime,
+	}
+	if p.DToken != "" {
+		raw["dtoken"] = p.DToken
+	}
+	return raw
+}
+
+type xxtMediaSubmitResult struct {
+	IsPassed   bool
+	OutTimeMsg string
+}
+
+func xxtParseMediaSubmit(raw string) (xxtMediaSubmitResult, error) {
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return xxtMediaSubmitResult{}, fmt.Errorf("xuexitong: media submit invalid response: %s", xxtResponseSnippet(raw))
+	}
+	if result, ok := resp["result"].(float64); ok && result == 0 {
+		return xxtMediaSubmitResult{}, fmt.Errorf("xuexitong: media submit failed: %s", xxtResponseSnippet(raw))
+	}
+	passed, ok := resp["isPassed"].(bool)
+	if !ok {
+		return xxtMediaSubmitResult{}, fmt.Errorf("xuexitong: media submit response missing isPassed: %s", xxtResponseSnippet(raw))
+	}
+	outTimeMsg, _ := resp["OutTimeMsg"].(string)
+	if outTimeMsg == "" {
+		outTimeMsg, _ = resp["outTimeMsg"].(string)
+	}
+	return xxtMediaSubmitResult{IsPassed: passed, OutTimeMsg: outTimeMsg}, nil
 }
 
 func xxtProgressProvided(input TaskInput) bool {
@@ -1127,17 +1167,6 @@ func xxtProgressProvided(input TaskInput) bool {
 		}
 	}
 	return false
-}
-
-func xxtParseMediaSubmit(raw string) error {
-	var resp map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return nil
-	}
-	if result, ok := resp["result"].(float64); ok && result == 0 {
-		return fmt.Errorf("xuexitong: media submit failed: %s", raw)
-	}
-	return nil
 }
 
 type xxtHyperlinkPrepared struct {

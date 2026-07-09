@@ -70,7 +70,7 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
-    fun `xuexitong audio scheduler drives prepare and 58s ticks`() = runTest {
+    fun `xuexitong audio scheduler sends start heartbeat then timed 58s ticks`() = runTest {
         val session = SessionData("xuexitong", "stu")
         val task = TaskItem("audio1", name = "audio", type = "audio", platform = "xuexitong", raw = JsonObject().apply {
             addProperty("courseId", "course1")
@@ -83,31 +83,37 @@ class PlatformTaskSchedulerTest {
             addProperty("duration", 116)
             addProperty("intervalSeconds", 58)
         }))
-        gateway.results.add(RunTaskResult("xuexitong", "audio1", "submitted", raw = JsonObject().apply {
+        gateway.results.add(RunTaskResult("xuexitong", "audio1", "progress", raw = JsonObject().apply {
+            addProperty("jobId", "job-1")
+            addProperty("duration", 116)
+            addProperty("playingTime", 0)
+            addProperty("isPassed", false)
+        }))
+        gateway.results.add(RunTaskResult("xuexitong", "audio1", "progress", raw = JsonObject().apply {
             addProperty("jobId", "job-1")
             addProperty("duration", 116)
             addProperty("playingTime", 58)
+            addProperty("isPassed", false)
         }))
-        gateway.results.add(RunTaskResult("xuexitong", "audio1", "submitted", raw = JsonObject().apply {
+        gateway.results.add(RunTaskResult("xuexitong", "audio1", "done", raw = JsonObject().apply {
             addProperty("jobId", "job-1")
             addProperty("duration", 116)
             addProperty("playingTime", 116)
-            // final tick reports isPassed so the 过超提交 over-submit loop is skipped
             addProperty("isPassed", true)
         }))
 
-        taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
 
-        assertEquals(listOf("audioPrepare", "audioTick", "audioTick"), gateway.options.map { it["action"] })
-        assertEquals(58, gateway.options[1]["playingTime"])
-        assertEquals(116, gateway.options[2]["playingTime"])
-        // after the 58 s tick the scheduler adds a random 10–60 s inter-task sleep, so only assert the tick cadence
-        assertEquals(58_000L, gateway.sleeps.first())
+        assertEquals("done", result.status)
+        assertEquals(listOf("audioPrepare", "audioTick", "audioTick", "audioTick"), gateway.options.map { it["action"] })
+        assertEquals(listOf(0, 58, 116), gateway.options.drop(1).map { it["playingTime"] })
+        assertEquals(listOf(3, 0, 0), gateway.options.drop(1).map { it["isdrag"] })
+        assertEquals(listOf(58_000L, 58_000L), gateway.sleeps.take(2))
         assertEquals(116.0, store.loadActionState("xuexitong", "stu", "audio1", "xuexitong-audio")!!.progress)
     }
 
     @Test
-    fun `xuexitong video scheduler drives prepare and 58s ticks`() = runTest {
+    fun `xuexitong video scheduler sends start heartbeat then timed 58s ticks`() = runTest {
         val session = SessionData("xuexitong", "stu")
         val task = TaskItem("video1", name = "video", type = "video", platform = "xuexitong", raw = JsonObject().apply {
             addProperty("courseId", "course1")
@@ -121,29 +127,69 @@ class PlatformTaskSchedulerTest {
             addProperty("duration", 116)
             addProperty("intervalSeconds", 58)
         }))
-        gateway.results.add(RunTaskResult("xuexitong", "video1", "submitted", raw = JsonObject().apply {
+        gateway.results.add(RunTaskResult("xuexitong", "video1", "progress", raw = JsonObject().apply {
+            addProperty("jobId", "job-1")
+            addProperty("dtoken", "token-1")
+            addProperty("duration", 116)
+            addProperty("playingTime", 0)
+            addProperty("isPassed", false)
+        }))
+        gateway.results.add(RunTaskResult("xuexitong", "video1", "progress", raw = JsonObject().apply {
             addProperty("jobId", "job-1")
             addProperty("dtoken", "token-1")
             addProperty("duration", 116)
             addProperty("playingTime", 58)
+            addProperty("isPassed", false)
         }))
-        gateway.results.add(RunTaskResult("xuexitong", "video1", "submitted", raw = JsonObject().apply {
+        gateway.results.add(RunTaskResult("xuexitong", "video1", "done", raw = JsonObject().apply {
             addProperty("jobId", "job-1")
             addProperty("dtoken", "token-1")
             addProperty("duration", 116)
             addProperty("playingTime", 116)
-            // final tick reports isPassed so the 过超提交 over-submit loop is skipped
             addProperty("isPassed", true)
         }))
 
-        taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
 
-        assertEquals(listOf("videoPrepare", "videoTick", "videoTick"), gateway.options.map { it["action"] })
-        assertEquals(58, gateway.options[1]["playingTime"])
-        assertEquals(116, gateway.options[2]["playingTime"])
-        // after the 58 s tick the scheduler adds a random 10–60 s inter-task sleep, so only assert the tick cadence
-        assertEquals(58_000L, gateway.sleeps.first())
+        assertEquals("done", result.status)
+        assertEquals(listOf("videoPrepare", "videoTick", "videoTick", "videoTick"), gateway.options.map { it["action"] })
+        assertEquals(listOf(0, 58, 116), gateway.options.drop(1).map { it["playingTime"] })
+        assertEquals(listOf(3, 0, 0), gateway.options.drop(1).map { it["isdrag"] })
+        assertEquals(listOf(58_000L, 58_000L), gateway.sleeps.take(2))
         assertEquals(116.0, store.loadActionState("xuexitong", "stu", "video1", "xuexitong-video")!!.progress)
+    }
+
+    @Test
+    fun `xuexitong short video waits real duration before end heartbeat`() = runTest {
+        val session = SessionData("xuexitong", "stu")
+        val task = TaskItem("short-video", name = "short", type = "video", platform = "xuexitong", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("classId", "class1")
+            addProperty("cpi", "cpi1")
+            addProperty("knowledgeId", "k1")
+        })
+        gateway.results.add(RunTaskResult("xuexitong", "short-video", "prepared", raw = JsonObject().apply {
+            addProperty("jobId", "job-1")
+            addProperty("dtoken", "token-1")
+            addProperty("duration", 1)
+        }))
+        gateway.results.add(RunTaskResult("xuexitong", "short-video", "progress", raw = JsonObject().apply {
+            addProperty("duration", 1)
+            addProperty("playingTime", 0)
+            addProperty("isPassed", false)
+        }))
+        gateway.results.add(RunTaskResult("xuexitong", "short-video", "done", raw = JsonObject().apply {
+            addProperty("duration", 1)
+            addProperty("playingTime", 1)
+            addProperty("isPassed", true)
+        }))
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+
+        assertEquals("done", result.status)
+        assertEquals(listOf(0, 1), gateway.options.drop(1).map { it["playingTime"] })
+        assertEquals(listOf(3, 0), gateway.options.drop(1).map { it["isdrag"] })
+        assertEquals(1_000L, gateway.sleeps.first())
     }
 
     @Test

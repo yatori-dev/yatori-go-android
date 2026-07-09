@@ -23,7 +23,7 @@ func fakeXxtVideoDto(raw string, err error) func() {
 
 func fakeXxtSubmit(raw string, err error) func() {
 	orig := xxtSubmitStudyProvider
-	xxtSubmitStudyProvider = func(_ *xxtmobile.XxtClient, _, _, _, _, _, _, _, _ string, _, _ int) (string, error) {
+	xxtSubmitStudyProvider = func(_ *xxtmobile.XxtClient, _ xxtmobile.VideoSubmitParams) (string, error) {
 		return raw, err
 	}
 	return func() { xxtSubmitStudyProvider = orig }
@@ -174,7 +174,7 @@ func TestRunTaskXuexitong_SubmitSuccess(t *testing.T) {
 	defer restoreCard()
 	restoreDto := fakeXxtVideoDto(`{"status":"success","dtoken":"tok-abc","duration":300}`, nil)
 	defer restoreDto()
-	restoreSubmit := fakeXxtSubmit(`{"result":1}`, nil)
+	restoreSubmit := fakeXxtSubmit(`{"isPassed":true}`, nil)
 	defer restoreSubmit()
 
 	e := parseEnvelope(t, RunTask(xxtSessJSON, xxtRunTaskJSON))
@@ -184,8 +184,8 @@ func TestRunTaskXuexitong_SubmitSuccess(t *testing.T) {
 	b, _ := json.Marshal(e.Data)
 	var res RunTaskResult
 	json.Unmarshal(b, &res)
-	if res.Status != "submitted" {
-		t.Fatalf("expected submitted, got %q", res.Status)
+	if res.Status != "done" {
+		t.Fatalf("expected done, got %q", res.Status)
 	}
 	if res.Platform != "xuexitong" || res.TaskID != "obj-1" {
 		t.Fatalf("unexpected: %+v", res)
@@ -260,6 +260,56 @@ func TestRunTaskXuexitong_SubmitFailed(t *testing.T) {
 	}
 }
 
+func TestRunTaskXuexitong_VideoTickRejectsMissingIsPassed(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtSubmit(`{"result":1}`, nil)()
+	taskJSON := `{"platform":"xuexitong","id":"obj-1","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"job-123","otherInfo":"info","dtoken":"tok","duration":240},"options":{"action":"videoTick","playingTime":58}}`
+	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
+	if e.OK {
+		t.Fatal("media response without isPassed must not be reported as submitted")
+	}
+	if !strings.Contains(e.Error, "missing isPassed") {
+		t.Fatalf("unexpected error: %s", e.Error)
+	}
+}
+
+func TestRunTaskXuexitong_VideoPrepareUsesCardFIDAndAntiCheatMetadata(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	cardHTML := `<script>window.AttachmentSetting = {"attachments":[{` +
+		`"type":"video","jobid":"job-123","objectId":"obj-1","otherInfo":"nodeId_111-cpi_1001-enc_abc&courseId=9001",` +
+		`"mid":"mid-1","playTime":58000,"attDuration":300,"isPassed":false,"job":true,` +
+		`"attDurationEnc":"duration-enc","videoFaceCaptureEnc":"face-enc","randomCaptureTime":"120",` +
+		`"property":{"objectid":"obj-1","module":"insertvideo","jobid":"job-123","name":"Video title","rt":1.25}` +
+		`}],"defaults":{"fid":"1590","userid":"7001"}};</script>`
+	defer fakeXxtCard(cardHTML, nil)()
+	origDTO := xxtVideoDtoProvider
+	gotFID := 0
+	xxtVideoDtoProvider = func(_ *xxtmobile.XxtClient, _ string, fid int) (string, error) {
+		gotFID = fid
+		return `{"status":"success","dtoken":"tok-video","duration":300}`, nil
+	}
+	defer func() { xxtVideoDtoProvider = origDTO }()
+	taskJSON := `{"platform":"xuexitong","id":"obj-1","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111},"options":{"action":"videoPrepare"}}`
+	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("videoPrepare should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if gotFID != 1590 {
+		t.Fatalf("video dto fid=%d want card defaults.fid=1590", gotFID)
+	}
+	if res.Raw["playingTime"] != float64(58) || res.Raw["attDurationEnc"] != "duration-enc" || res.Raw["videoFaceCaptureEnc"] != "face-enc" {
+		t.Fatalf("video prepare lost playback/anti-cheat metadata: %+v", res.Raw)
+	}
+	if res.Raw["isPassed"] != false || res.Raw["isPassedKnown"] != true || res.Raw["isJob"] != true || res.Raw["isJobKnown"] != true {
+		t.Fatalf("video prepare completion flags mismatch: %+v", res.Raw)
+	}
+}
+
 func TestRunTaskXuexitong_VideoPrepare(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
@@ -300,8 +350,14 @@ func TestRunTaskXuexitong_VideoTickDryRun(t *testing.T) {
 func TestRunTaskXuexitong_VideoTickRealSubmit(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
-	defer fakeXxtSubmit(`{"result":1}`, nil)()
-	taskJSON := `{"platform":"xuexitong","id":"obj-1","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"job-123","otherInfo":"info","dtoken":"tok","duration":240},"options":{"action":"videoTick","playingTime":58}}`
+	orig := xxtSubmitStudyProvider
+	var got xxtmobile.VideoSubmitParams
+	xxtSubmitStudyProvider = func(_ *xxtmobile.XxtClient, p xxtmobile.VideoSubmitParams) (string, error) {
+		got = p
+		return `{"isPassed":false}`, nil
+	}
+	defer func() { xxtSubmitStudyProvider = orig }()
+	taskJSON := `{"platform":"xuexitong","id":"obj-1","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"job-123","otherInfo":"info","dtoken":"tok","duration":240,"attDurationEnc":"duration-enc","videoFaceCaptureEnc":"face-enc","rt":1.25},"options":{"action":"videoTick","playingTime":58,"isdrag":3}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("videoTick real submit should succeed: %s", e.Error)
@@ -309,8 +365,11 @@ func TestRunTaskXuexitong_VideoTickRealSubmit(t *testing.T) {
 	b, _ := json.Marshal(e.Data)
 	var res RunTaskResult
 	json.Unmarshal(b, &res)
-	if res.Status != "submitted" || res.Raw["realSubmit"] != true {
+	if res.Status != "progress" || res.Raw["realSubmit"] != true || res.Raw["isPassed"] != false {
 		t.Fatalf("unexpected video submit: %+v", res)
+	}
+	if got.IsDrag != 3 || got.PlayingTime != 58 || got.AttDurationEnc != "duration-enc" || got.VideoFaceCaptureEnc != "face-enc" || got.RT != 1.25 {
+		t.Fatalf("video heartbeat metadata mismatch: %+v", got)
 	}
 }
 
@@ -373,7 +432,7 @@ func TestRunTaskXuexitong_AudioTickRealSubmit(t *testing.T) {
 	b, _ := json.Marshal(e.Data)
 	var res RunTaskResult
 	json.Unmarshal(b, &res)
-	if res.Status != "submitted" || res.Raw["realSubmit"] != true {
+	if res.Status != "progress" || res.Raw["realSubmit"] != true || res.Raw["isPassed"] != false {
 		t.Fatalf("unexpected audio submit: %+v", res)
 	}
 }

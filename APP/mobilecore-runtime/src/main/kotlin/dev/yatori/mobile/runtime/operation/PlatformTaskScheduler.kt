@@ -351,37 +351,58 @@ class PlatformTaskScheduler(
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
         val prepared = actions.prepareXuexitongAudio(session, task)
+        if (prepared.status == "done" || prepared.status == "skipped" || jsonBool(prepared.raw, "isPassed")) {
+            return RunTaskResult(session.platform, task.id, prepared.status, raw = prepared.raw)
+        }
         val total = durationSeconds(prepared.task.raw, "duration", "timeLength", "videoLength").takeIf { it > 0 } ?: 58
-
-        // Resume from current playingTime and reset-if-stuck logic, same as video.
         val rawPlayingTime = durationSeconds(prepared.task.raw, "playingTime").coerceAtLeast(0)
-        val isFinishAlready = jsonBool(prepared.raw, "isPassed") || jsonBool(prepared.raw, "isFinish")
-        var position = if (!isFinishAlready && rawPlayingTime >= total) 0 else rawPlayingTime
+        var position = if (rawPlayingTime >= total) 0 else rawPlayingTime
+        if (shouldCancel()) return RunTaskResult(session.platform, task.id, "prepared", raw = prepared.raw)
 
-        val ticks = min(options.maxTicksPerTask, max(1, ceil((total - position).coerceAtLeast(0) / 58.0).toInt()))
-        var last = RunTaskResult(session.platform, task.id, "prepared", raw = prepared.raw)
-        for (i in 1..ticks) {
+        // Match console: submit the current position once as a start event (isdrag=3),
+        // then wait the real elapsed time before advancing the reported position.
+        var last = actions.tickXuexitongAudio(
+            session,
+            task.id,
+            XuexitongMediaTickInput(progress = position, realSubmit = true, isDrag = 3),
+        )
+        val expectedTicks = max(1, ceil((total - position).coerceAtLeast(0) / 58.0).toInt())
+        var tickIndex = 0
+        while (position < total && tickIndex < options.maxTicksPerTask && !jsonBool(last.raw, "isPassed")) {
+            val delta = min(58, total - position)
+            sleepMillis(delta * 1000L)
             if (shouldCancel()) return last
-            sleepBeforeTick(i, 58)
-            position = min(total, position + 58)
-            last = actions.tickXuexitongAudio(session, task.id, XuexitongMediaTickInput(progress = position, realSubmit = true))
-            onEvent(tickEvent(session.platform, task, i, ticks, ((position.toDouble() / max(1, total)) * 100.0).toInt().coerceIn(1, 100)))
-            if (position >= total) break
+            position += delta
+            tickIndex++
+            last = actions.tickXuexitongAudio(
+                session,
+                task.id,
+                XuexitongMediaTickInput(progress = position, realSubmit = true, isDrag = 0),
+            )
+            onEvent(tickEvent(session.platform, task, tickIndex, expectedTicks, ((position.toDouble() / max(1, total)) * 100.0).toInt().coerceIn(1, 100)))
+        }
+        if (position < total && !jsonBool(last.raw, "isPassed")) {
+            error("xuexitong audio exceeded maxTicksPerTask before reaching duration: $position/$total")
         }
 
-        // 过超提交 for audio (same as video).
         val limitTime = max(500, total / 2)
         var overTime = 0
         val extendSec = 5
-        while (!shouldCancel() && overTime < limitTime && !jsonBool(last.raw, "isPassed") && !jsonBool(last.raw, "isFinish")) {
+        while (!shouldCancel() && overTime < limitTime && !jsonBool(last.raw, "isPassed")) {
             sleepMillis(extendSec * 1000L)
             overTime += extendSec
-            last = actions.tickXuexitongAudio(session, task.id, XuexitongMediaTickInput(progress = total, realSubmit = true))
-            onEvent(tickEvent(session.platform, task, ticks + (overTime / extendSec), ticks, 100))
+            last = actions.tickXuexitongAudio(
+                session,
+                task.id,
+                XuexitongMediaTickInput(progress = total, realSubmit = true, isDrag = 0),
+            )
+            onEvent(tickEvent(session.platform, task, expectedTicks + (overTime / extendSec), expectedTicks, 100))
         }
-
-        // Random 10–60 s inter-task sleep (same as video).
-        if (!shouldCancel()) sleepMillis((Random.nextInt(51) + 10) * 1000L)
+        if (shouldCancel()) return last
+        if (!jsonBool(last.raw, "isPassed")) {
+            error("xuexitong audio server did not confirm isPassed after ${limitTime}s overtime")
+        }
+        sleepMillis((Random.nextInt(51) + 10) * 1000L)
         return last
     }
 
@@ -393,39 +414,58 @@ class PlatformTaskScheduler(
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
         val prepared = actions.prepareXuexitongVideo(session, task)
+        if (prepared.status == "done" || prepared.status == "skipped" || jsonBool(prepared.raw, "isPassed")) {
+            return RunTaskResult(session.platform, task.id, prepared.status, raw = prepared.raw)
+        }
         val total = durationSeconds(prepared.task.raw, "duration", "timeLength", "videoLength").takeIf { it > 0 } ?: 58
-
-        // Resume from current playingTime (mirrors console: var playingTime = p.PlayTime).
-        // Reset to 0 when stuck at end without isPassed (console: if !isPassed && PlayTime==Duration).
         val rawPlayingTime = durationSeconds(prepared.task.raw, "playingTime").coerceAtLeast(0)
-        val isFinishAlready = jsonBool(prepared.raw, "isPassed") || jsonBool(prepared.raw, "isFinish")
-        var position = if (!isFinishAlready && rawPlayingTime >= total) 0 else rawPlayingTime
+        var position = if (rawPlayingTime >= total) 0 else rawPlayingTime
+        if (shouldCancel()) return RunTaskResult(session.platform, task.id, "prepared", raw = prepared.raw)
 
-        val ticks = min(options.maxTicksPerTask, max(1, ceil((total - position).coerceAtLeast(0) / 58.0).toInt()))
-        var last = RunTaskResult(session.platform, task.id, "prepared", raw = prepared.raw)
-        for (i in 1..ticks) {
+        // The first heartbeat reports the current position as a start event. Progress is only
+        // advanced after the corresponding real elapsed time, including short (<58 s) videos.
+        var last = actions.tickXuexitongVideo(
+            session,
+            task.id,
+            XuexitongMediaTickInput(progress = position, realSubmit = true, isDrag = 3),
+        )
+        val expectedTicks = max(1, ceil((total - position).coerceAtLeast(0) / 58.0).toInt())
+        var tickIndex = 0
+        while (position < total && tickIndex < options.maxTicksPerTask && !jsonBool(last.raw, "isPassed")) {
+            val delta = min(58, total - position)
+            sleepMillis(delta * 1000L)
             if (shouldCancel()) return last
-            sleepBeforeTick(i, 58)
-            position = min(total, position + 58)
-            last = actions.tickXuexitongVideo(session, task.id, XuexitongMediaTickInput(progress = position, realSubmit = true))
-            onEvent(tickEvent(session.platform, task, i, ticks, ((position.toDouble() / max(1, total)) * 100.0).toInt().coerceIn(1, 100)))
-            if (position >= total) break
+            position += delta
+            tickIndex++
+            last = actions.tickXuexitongVideo(
+                session,
+                task.id,
+                XuexitongMediaTickInput(progress = position, realSubmit = true, isDrag = 0),
+            )
+            onEvent(tickEvent(session.platform, task, tickIndex, expectedTicks, ((position.toDouble() / max(1, total)) * 100.0).toInt().coerceIn(1, 100)))
+        }
+        if (position < total && !jsonBool(last.raw, "isPassed")) {
+            error("xuexitong video exceeded maxTicksPerTask before reaching duration: $position/$total")
         }
 
-        // 过超提交: if video reached full duration but not yet isPassed, keep submitting
-        // extra 5 s intervals up to limitTime = max(500, duration/2) — mirrors console ExecuteVideo.
         val limitTime = max(500, total / 2)
         var overTime = 0
         val extendSec = 5
-        while (!shouldCancel() && overTime < limitTime && !jsonBool(last.raw, "isPassed") && !jsonBool(last.raw, "isFinish")) {
+        while (!shouldCancel() && overTime < limitTime && !jsonBool(last.raw, "isPassed")) {
             sleepMillis(extendSec * 1000L)
             overTime += extendSec
-            last = actions.tickXuexitongVideo(session, task.id, XuexitongMediaTickInput(progress = total, realSubmit = true))
-            onEvent(tickEvent(session.platform, task, ticks + (overTime / extendSec), ticks, 100))
+            last = actions.tickXuexitongVideo(
+                session,
+                task.id,
+                XuexitongMediaTickInput(progress = total, realSubmit = true, isDrag = 0),
+            )
+            onEvent(tickEvent(session.platform, task, expectedTicks + (overTime / extendSec), expectedTicks, 100))
         }
-
-        // Random 10–60 s inter-task sleep (mirrors console rand.Intn(51)+10 between video tasks).
-        if (!shouldCancel()) sleepMillis((Random.nextInt(51) + 10) * 1000L)
+        if (shouldCancel()) return last
+        if (!jsonBool(last.raw, "isPassed")) {
+            error("xuexitong video server did not confirm isPassed after ${limitTime}s overtime")
+        }
+        sleepMillis((Random.nextInt(51) + 10) * 1000L)
         return last
     }
 
