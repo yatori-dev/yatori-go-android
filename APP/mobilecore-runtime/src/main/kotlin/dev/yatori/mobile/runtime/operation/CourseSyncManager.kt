@@ -95,6 +95,12 @@ class CourseSyncManager(
         status.equals("completed", true) || status.equals("done", true) ||
             status.equals("finished", true) || progress >= 100.0
 
+    private fun RunTaskResult.isSubmittedOrDone(): Boolean {
+        val normalized = status.trim()
+        return normalized.equals("submitted", ignoreCase = true) ||
+            normalized.equals("done", ignoreCase = true)
+    }
+
     suspend fun run(
         session: SessionData,
         plan: RunPlan,
@@ -169,7 +175,7 @@ class CourseSyncManager(
                     controller.updateProgress(opId, completed = index, total = pending.size, detail = p.task.name.ifBlank { p.task.id })
                     runCatching { runOneTask(session, p.task, plan, opId, emit) }
                         .onSuccess { r ->
-                            submitted.add(p.task.id)
+                            if (r.isSubmittedOrDone()) submitted.add(p.task.id)
                             emit(SyncEvent("info", "${p.course.name}／${p.task.name}：${r.status}", plan.platform))
                         }
                         .onFailure { e ->
@@ -315,7 +321,7 @@ class CourseSyncManager(
                                         { controller.isCancelling(opId) },
                                         onEvent,
                                     )
-                                    submitted.add(task.id)
+                                    if (r.isSubmittedOrDone()) submitted.add(task.id)
                                     onEvent(SyncEvent("info", "${course.name}／${task.name}：${r.status}", session.platform))
                                 }.onFailure { e ->
                                     onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
@@ -468,7 +474,7 @@ class CourseSyncManager(
             if (task.isFinished() || task.id in plan.completedTaskIds) continue
             runCatching { runOneTask(session, task, plan, opId, onEvent) }
                 .onSuccess { r ->
-                    submitted.add(task.id)
+                    if (r.isSubmittedOrDone()) submitted.add(task.id)
                     onEvent(SyncEvent("info", "${course.name}／${node.node.name}／${task.name}：${r.status}", session.platform))
                 }
                 .onFailure { e ->

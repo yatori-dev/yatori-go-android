@@ -51,6 +51,39 @@ class CourseSyncManagerTest {
         }
     }
 
+    private class ResultStatusRunner(
+        private val platform: String,
+        statuses: List<String>,
+    ) : CourseTaskRunner {
+        val tasks = statuses.mapIndexed { index, status ->
+            TaskItem("result-$index", name = status, type = "video", platform = platform)
+        }
+        val executed = mutableListOf<String>()
+        private val course = CourseItem("result-course", name = "Result Course", platform = platform)
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(course)
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> = tasks
+        override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>): RunTaskResult {
+            executed.add(task.id)
+            return RunTaskResult(platform, task.id, task.name)
+        }
+    }
+
+    private class ResultStatusPlatformRunner : PlatformTaskRunner {
+        val executed = mutableListOf<String>()
+        override fun supports(session: SessionData, task: TaskItem): Boolean = true
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            executed.add(task.id)
+            return RunTaskResult(session.platform, task.id, task.name)
+        }
+    }
+
     @Test
     fun `submits all unfinished tasks across courses`() = runTest {
         val runner = FakeRunner(
@@ -106,8 +139,49 @@ class CourseSyncManagerTest {
         )
         val events = mutableListOf<SyncEvent>()
         val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
-        mgr.run(session, RunPlan("plan4", "yinghua", "stu", dryRun = true), onEvent = { events.add(it) })
+        val submitted = mgr.run(session, RunPlan("plan4", "yinghua", "stu", dryRun = true), onEvent = { events.add(it) })
         assertTrue(events.any { it.message.contains("dry_run") })
+        assertTrue(submitted.isEmpty())
+    }
+
+    @Test
+    fun genericHostOnlyCountsSubmittedAndDoneResults() = runTest {
+        val statuses = listOf("submitted", "done", "dry_run", "prepared", "rejected", "progress", "incomplete", "skipped")
+        val runner = ResultStatusRunner("generic", statuses)
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        val submitted = mgr.run(SessionData("generic", "stu"), RunPlan("result-generic", "generic", "stu"))
+
+        assertEquals(listOf("result-0", "result-1"), submitted)
+        assertEquals(runner.tasks.map { it.id }, runner.executed)
+    }
+
+    @Test
+    fun xuexitongHostOnlyCountsSubmittedAndDoneResults() = runTest {
+        val statuses = listOf("submitted", "done", "dry_run", "prepared", "rejected", "progress", "incomplete", "skipped")
+        val runner = ResultStatusRunner("xuexitong", statuses)
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        val submitted = mgr.run(SessionData("xuexitong", "stu"), RunPlan("result-xxt", "xuexitong", "stu"))
+
+        assertEquals(listOf("result-0", "result-1"), submitted)
+        assertEquals(runner.tasks.map { it.id }, runner.executed)
+    }
+
+    @Test
+    fun yinghuaViolenceModeOnlyCountsSubmittedAndDoneResults() = runTest {
+        val statuses = listOf("submitted", "done", "dry_run", "prepared", "rejected", "progress", "incomplete", "skipped")
+        val runner = ResultStatusRunner("yinghua", statuses)
+        val platformRunner = ResultStatusPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("result-yinghua-mode2", "yinghua", "stu", yinghuaVideoModel = 2),
+        )
+
+        assertEquals(setOf("result-0", "result-1"), submitted.toSet())
+        assertEquals(runner.tasks.map { it.id }.toSet(), platformRunner.executed.toSet())
     }
 
     @Test
@@ -474,8 +548,9 @@ class CourseSyncManagerTest {
             answerProviderFactory = AnswerProviderFactory { provider },
         )
 
-        mgr.run(SessionData("xuexitong", "stu"), bbsPlan())
+        val submitted = mgr.run(SessionData("xuexitong", "stu"), bbsPlan())
 
+        assertTrue(submitted.isEmpty())
         assertEquals(listOf("bbsPrepare"), runner.actions)
         assertEquals(0, provider.answerCalls)
         assertTrue(runner.submittedContent.isEmpty())
