@@ -192,6 +192,54 @@ func TestGetCoursesErrorPathLogsRecorded(t *testing.T) {
 	}
 }
 
+func TestCourseDiscoveryProgressLogsAreDebugOnly(t *testing.T) {
+	resetState()
+	resetLogs()
+	Init("/tmp/test")
+	resetLogs() // discard Init's user-facing info log
+
+	defer fakeXxtCourseList(xxtFakeCourseList, nil)()
+	defer fakeXxtChapter(xxtFakeChapter, nil)()
+	defer fakeXxtKnowledgeCards(`{"data":[{"card":{"data":[]}}]}`, nil)()
+
+	runDiscovery := func() {
+		if e := parseEnvelope(t, GetCourses(xxtSessJSON)); !e.OK {
+			t.Fatalf("GetCourses failed: %s", e.Error)
+		}
+		if e := parseEnvelope(t, GetCourseDetail(xxtSessJSON, xxtCourseJSON)); !e.OK {
+			t.Fatalf("GetCourseDetail failed: %s", e.Error)
+		}
+		courseJSON := `{"platform":"xuexitong","id":"111","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111}}`
+		if e := parseEnvelope(t, GetTasks(xxtSessJSON, courseJSON)); !e.OK {
+			t.Fatalf("GetTasks failed: %s", e.Error)
+		}
+	}
+
+	// Default INFO should hide low-level discovery chatter.
+	runDiscovery()
+	_, logs := parseGetLogsData(t, GetLogs("0"))
+	if len(logs) != 0 {
+		t.Fatalf("course discovery should be silent at info level, got %+v", logs)
+	}
+
+	// The same diagnostics remain available when DEBUG is explicitly enabled.
+	if e := parseEnvelope(t, SetLogLevel("debug")); !e.OK {
+		t.Fatalf("SetLogLevel(debug) failed: %s", e.Error)
+	}
+	defer SetLogLevel("info")
+	ClearLogs()
+	runDiscovery()
+	_, logs = parseGetLogsData(t, GetLogs("0"))
+	if len(logs) != 6 {
+		t.Fatalf("expected 6 discovery debug logs, got %d: %+v", len(logs), logs)
+	}
+	for _, entry := range logs {
+		if entry.Level != "debug" {
+			t.Fatalf("discovery log level=%q, want debug: %+v", entry.Level, entry)
+		}
+	}
+}
+
 // --- Phase 2.3 additions ---
 
 func parseGetLogsDataFull(t *testing.T, s string) (nextCursor string, logs []LogEntry, truncated bool, oldestCursor string) {

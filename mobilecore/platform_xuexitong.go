@@ -1186,18 +1186,8 @@ func xxtHyperlinkSubmit(sess SessionData, input TaskInput) (RunTaskResult, error
 		return RunTaskResult{}, fmt.Errorf("xuexitong: hyperlink submit failed: %w", err)
 	}
 	raw = xxtHyperlinkRaw(prepared, true, resp)
-	status, msg, ok := xxtParseHyperlinkSubmit(resp)
-	if ok && !status {
-		if msg == "" {
-			msg = resp
-		}
-		return RunTaskResult{
-			Platform: "xuexitong",
-			TaskID:   prepared.taskID(),
-			Status:   "rejected",
-			Message:  msg,
-			Raw:      raw,
-		}, nil
+	if err := xxtValidateCompletionSubmit("hyperlink", resp); err != nil {
+		return RunTaskResult{}, err
 	}
 	return RunTaskResult{
 		Platform: "xuexitong",
@@ -1290,15 +1280,35 @@ func xxtHyperlinkRaw(p xxtHyperlinkPrepared, realSubmit bool, response string) m
 	return raw
 }
 
-func xxtParseHyperlinkSubmit(raw string) (status bool, msg string, ok bool) {
+func xxtValidateCompletionSubmit(kind, raw string) error {
 	var resp struct {
-		Status bool   `json:"status"`
+		Status *bool  `json:"status"`
 		Msg    string `json:"msg"`
 	}
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return false, "", false
+		return fmt.Errorf("xuexitong: %s submit invalid response: %s", kind, xxtResponseSnippet(raw))
 	}
-	return resp.Status, resp.Msg, true
+	if resp.Status == nil {
+		return fmt.Errorf("xuexitong: %s submit response missing status: %s", kind, xxtResponseSnippet(raw))
+	}
+	if !*resp.Status {
+		msg := strings.TrimSpace(resp.Msg)
+		if msg == "" {
+			msg = xxtResponseSnippet(raw)
+		}
+		return fmt.Errorf("xuexitong: %s submit rejected: %s", kind, msg)
+	}
+	return nil
+}
+
+func xxtResponseSnippet(raw string) string {
+	const maxRunes = 500
+	clean := strings.TrimSpace(raw)
+	runes := []rune(clean)
+	if len(runes) > maxRunes {
+		clean = string(runes[:maxRunes]) + "…"
+	}
+	return clean
 }
 
 type xxtDocumentPrepared struct {
@@ -1349,12 +1359,8 @@ func xxtDocumentSubmit(sess SessionData, input TaskInput) (RunTaskResult, error)
 		return RunTaskResult{}, fmt.Errorf("xuexitong: document submit failed: %w", err)
 	}
 	raw = xxtDocumentRaw(prepared, true, resp)
-	status, msg, ok := xxtParseHyperlinkSubmit(resp)
-	if ok && !status {
-		if msg == "" {
-			msg = resp
-		}
-		return RunTaskResult{Platform: "xuexitong", TaskID: prepared.taskID(), Status: "rejected", Message: msg, Raw: raw}, nil
+	if err := xxtValidateCompletionSubmit("document", resp); err != nil {
+		return RunTaskResult{}, err
 	}
 	return RunTaskResult{Platform: "xuexitong", TaskID: prepared.taskID(), Status: "submitted", Raw: raw}, nil
 }

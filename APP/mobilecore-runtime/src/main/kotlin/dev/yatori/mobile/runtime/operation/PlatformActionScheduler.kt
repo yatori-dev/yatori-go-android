@@ -387,7 +387,7 @@ class PlatformActionScheduler(
         val prepareAction = if (action == "read" || action == "readv2") "readPrepare" else "documentPrepare"
         val prepared = repository.runTask(session, task, mapOf("action" to prepareAction))
         val state = saveState(session, task, "xuexitong-document", prepared, progress = 0.0, intervalSeconds = 0)
-        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to action))
+        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to action, "realSubmit" to true))
         saveState(session, state.task, "xuexitong-document", result, progress = 100.0, intervalSeconds = 0)
         return result
     }
@@ -396,7 +396,7 @@ class PlatformActionScheduler(
         require(session.platform == "xuexitong") { "xuexitong hyperlink requires a xuexitong session" }
         val prepared = repository.runTask(session, task, mapOf("action" to "hyperlinkPrepare"))
         val state = saveState(session, task, "xuexitong-hyperlink", prepared, progress = 0.0, intervalSeconds = 0)
-        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to "hyperlink"))
+        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to "hyperlink", "realSubmit" to true))
         saveState(session, state.task, "xuexitong-hyperlink", result, progress = 100.0, intervalSeconds = 0)
         return result
     }

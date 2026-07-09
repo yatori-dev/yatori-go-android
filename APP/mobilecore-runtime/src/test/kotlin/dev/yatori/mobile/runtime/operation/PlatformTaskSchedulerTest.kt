@@ -187,6 +187,7 @@ class PlatformTaskSchedulerTest {
         gateway.results.add(RunTaskResult("xuexitong", "doc1", "prepared", raw = JsonObject().apply {
             addProperty("jobId", "job-doc")
             addProperty("jtoken", "token")
+            addProperty("realSubmit", false)
         }))
         gateway.results.add(RunTaskResult("xuexitong", "doc1", "submitted", raw = JsonObject().apply {
             addProperty("jobId", "job-doc")
@@ -196,7 +197,29 @@ class PlatformTaskSchedulerTest {
 
         assertEquals("submitted", result.status)
         assertEquals(listOf("documentPrepare", "document"), gateway.options.map { it["action"] })
+        assertEquals(true, gateway.options[1]["realSubmit"])
         assertEquals(100.0, store.loadActionState("xuexitong", "stu", "doc1", "xuexitong-document")!!.progress)
+    }
+
+    @Test
+    fun `xuexitong hyperlink scheduler overrides prepare dry-run flag`() = runTest {
+        val session = SessionData("xuexitong", "stu")
+        val task = TaskItem("link1", name = "link", type = "hyperlink", platform = "xuexitong")
+        gateway.results.add(RunTaskResult("xuexitong", "link1", "prepared", raw = JsonObject().apply {
+            addProperty("jobId", "job-link")
+            addProperty("jtoken", "token")
+            addProperty("realSubmit", false)
+        }))
+        gateway.results.add(RunTaskResult("xuexitong", "link1", "submitted", raw = JsonObject().apply {
+            addProperty("jobId", "job-link")
+        }))
+
+        val result = taskScheduler.runTask(session, task)
+
+        assertEquals("submitted", result.status)
+        assertEquals(listOf("hyperlinkPrepare", "hyperlink"), gateway.options.map { it["action"] })
+        assertEquals(true, gateway.options[1]["realSubmit"])
+        assertEquals(100.0, store.loadActionState("xuexitong", "stu", "link1", "xuexitong-hyperlink")!!.progress)
     }
 
     private class FakeGateway : CoreGateway {

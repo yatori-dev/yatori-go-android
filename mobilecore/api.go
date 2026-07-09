@@ -135,13 +135,13 @@ func GetCourses(sessionJSON string) (result string) {
 		logWarn("", "GetCourses: invalid sessionJSON")
 		return errResp(fmt.Sprintf("invalid sessionJSON: %v", err))
 	}
-	logInfo(sess.Platform, "获取课程列表")
+	logDebug(sess.Platform, "获取课程列表")
 	courses, err := dispatchGetCourses(sess)
 	if err != nil {
 		logError(sess.Platform, "获取课程失败："+err.Error())
 		return errResp(err.Error())
 	}
-	logInfo(sess.Platform, fmt.Sprintf("获取到 %d 门课程", len(courses.Courses)))
+	logDebug(sess.Platform, fmt.Sprintf("获取到 %d 门课程", len(courses.Courses)))
 	return okResp(courses)
 }
 
@@ -202,13 +202,13 @@ func GetTasks(sessionJSON, courseJSON string) (result string) {
 	if input.Platform == "" {
 		input.Platform = sess.Platform
 	}
-	logInfo(input.Platform, "获取任务列表 id="+input.ID)
+	logDebug(input.Platform, "获取任务列表 id="+input.ID)
 	tasks, err := dispatchGetTasks(sess, input)
 	if err != nil {
 		logError(input.Platform, "获取任务失败："+err.Error())
 		return errResp(err.Error())
 	}
-	logInfo(input.Platform, fmt.Sprintf("获取到 %d 个任务", len(tasks.Tasks)))
+	logDebug(input.Platform, fmt.Sprintf("获取到 %d 个任务", len(tasks.Tasks)))
 	return okResp(tasks)
 }
 
@@ -235,13 +235,13 @@ func GetCourseDetail(sessionJSON, courseJSON string) (result string) {
 	if input.Platform == "" {
 		input.Platform = sess.Platform
 	}
-	logInfo(input.Platform, "获取课程详情 id="+input.ID)
+	logDebug(input.Platform, "获取课程详情 id="+input.ID)
 	detail, err := dispatchGetCourseDetail(sess, input)
 	if err != nil {
 		logError(input.Platform, "获取课程详情失败："+err.Error())
 		return errResp(err.Error())
 	}
-	logInfo(input.Platform, fmt.Sprintf("课程详情获取完成，共 %d 项", len(detail.Items)))
+	logDebug(input.Platform, fmt.Sprintf("课程详情获取完成，共 %d 项", len(detail.Items)))
 	return okResp(detail)
 }
 

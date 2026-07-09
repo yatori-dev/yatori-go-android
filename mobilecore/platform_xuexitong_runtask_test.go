@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	xxtmobile "github.com/yatori-dev/yatori-go-mobile-core/api/xuexitong/mobile"
@@ -446,14 +447,11 @@ func TestRunTaskXuexitong_HyperlinkRejected(t *testing.T) {
 	defer fakeXxtHyperlinkSubmit(`{"status":false,"msg":"no"}`, nil)()
 	taskJSON := `{"platform":"xuexitong","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"link-job","jtoken":"jt-1"},"options":{"action":"hyperlink","realSubmit":true}}`
 	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
-	if !e.OK {
-		t.Fatalf("hyperlink rejected response should return result: %s", e.Error)
+	if e.OK {
+		t.Fatal("hyperlink business rejection must fail the task")
 	}
-	b, _ := json.Marshal(e.Data)
-	var res RunTaskResult
-	json.Unmarshal(b, &res)
-	if res.Status != "rejected" || res.Message != "no" || res.Raw["realSubmit"] != true {
-		t.Fatalf("unexpected hyperlink rejection: %+v", res)
+	if !strings.Contains(e.Error, "hyperlink submit rejected") || !strings.Contains(e.Error, "no") {
+		t.Fatalf("unexpected hyperlink rejection error: %q", e.Error)
 	}
 }
 
@@ -491,6 +489,47 @@ func TestRunTaskXuexitong_DocumentDefaultSubmit(t *testing.T) {
 	json.Unmarshal(b, &res)
 	if res.Status != "submitted" || res.Raw["realSubmit"] != true {
 		t.Fatalf("unexpected document submit: %+v", res)
+	}
+}
+
+func TestRunTaskXuexitong_DocumentRejected(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	defer fakeXxtDocumentSubmit(`{"status":false,"msg":"document denied"}`, nil)()
+	taskJSON := `{"platform":"xuexitong","id":"obj-doc","raw":{"courseId":"9001","classId":"2001","cpi":"1001","knowledgeId":111,"jobId":"doc-job","jtoken":"jt-doc"},"options":{"action":"document","realSubmit":true}}`
+	e := parseEnvelope(t, RunTask(xxtSessJSON, taskJSON))
+	if e.OK {
+		t.Fatal("document business rejection must fail the task")
+	}
+	if !strings.Contains(e.Error, "document submit rejected") || !strings.Contains(e.Error, "document denied") {
+		t.Fatalf("unexpected document rejection error: %q", e.Error)
+	}
+}
+
+func TestXxtValidateCompletionSubmit_Strict(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "success", raw: `{"status":true}`},
+		{name: "rejected", raw: `{"status":false,"msg":"denied"}`, wantErr: "submit rejected: denied"},
+		{name: "missing status", raw: `{"msg":"ok"}`, wantErr: "response missing status"},
+		{name: "invalid json", raw: `<!DOCTYPE html>`, wantErr: "invalid response"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := xxtValidateCompletionSubmit("document", tt.raw)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error=%v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
