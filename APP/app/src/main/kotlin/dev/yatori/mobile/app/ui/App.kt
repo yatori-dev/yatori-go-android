@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.yatori.mobile.app.di.AppContainer
+import dev.yatori.mobile.app.ui.common.topBarBlur
 import dev.yatori.mobile.app.ui.component.FloatingBottomBar
 import dev.yatori.mobile.app.ui.component.FloatingBottomBarItem
 import dev.yatori.mobile.app.ui.courses.AddAccountScreen
@@ -110,10 +112,12 @@ fun YatoriApp(
     // Liquid-glass backdrop captures the tab content so the floating bar can refract it.
     val surfaceColor = MiuixTheme.colorScheme.surface
     val contentBackdrop = rememberLayerBackdrop { drawRect(surfaceColor); drawContent() }
-    // Blur stays active regardless of navigation, so the floating glass bar keeps its frost
-    // through the whole cover / reveal transition (it is only ever hidden behind an opaque
-    // secondary screen, never blinked out). Costs some GPU while a secondary is open.
-    val blurActive = useFloating && themeState.blur && isRenderEffectSupported()
+    // Blur is driven purely by the theme switch (not by bar style or navigation): both the
+    // floating glass bar and the classic NavigationBar frost the tab content behind them, and
+    // the bar keeps its frost through the whole cover / reveal transition (it is only ever
+    // hidden behind an opaque secondary screen, never blinked out). Costs some GPU while a
+    // secondary is open.
+    val blurActive = themeState.blur && isRenderEffectSupported()
 
     // Bottom bar content, WITHOUT any secondary gate. It now lives inside the primary
     // (tab) layer via a nested Scaffold, so a secondary screen sliding over it covers /
@@ -141,11 +145,16 @@ fun YatoriApp(
                 }
             }
         } else {
-            NavigationBar {
-                NavigationBarItem(selected = nav.tab == Tab.HOME,     onClick = { nav.selectTab(Tab.HOME) },     icon = Icons.Rounded.Cottage,     label = "主页")
-                NavigationBarItem(selected = nav.tab == Tab.COURSES,  onClick = { nav.selectTab(Tab.COURSES) },  icon = Icons.Rounded.MenuBook,    label = "课程")
-                NavigationBarItem(selected = nav.tab == Tab.LOGS,     onClick = { nav.selectTab(Tab.LOGS) },     icon = Icons.Rounded.Description, label = "日志")
-                NavigationBarItem(selected = nav.tab == Tab.SETTINGS, onClick = { nav.selectTab(Tab.SETTINGS) }, icon = Icons.Rounded.Settings,    label = "设置")
+            // Classic NavigationBar: frost the tab content behind it (same textureBlur path as
+            // the app's top bars). When blur is off, fall back to an opaque surface bar.
+            val barTint = MiuixTheme.colorScheme.surface.copy(alpha = 0.7f)
+            Box(Modifier.topBarBlur(if (blurActive) contentBackdrop else null, barTint)) {
+                NavigationBar(color = if (blurActive) Color.Transparent else MiuixTheme.colorScheme.surface) {
+                    NavigationBarItem(selected = nav.tab == Tab.HOME,     onClick = { nav.selectTab(Tab.HOME) },     icon = Icons.Rounded.Cottage,     label = "主页")
+                    NavigationBarItem(selected = nav.tab == Tab.COURSES,  onClick = { nav.selectTab(Tab.COURSES) },  icon = Icons.Rounded.MenuBook,    label = "课程")
+                    NavigationBarItem(selected = nav.tab == Tab.LOGS,     onClick = { nav.selectTab(Tab.LOGS) },     icon = Icons.Rounded.Description, label = "日志")
+                    NavigationBarItem(selected = nav.tab == Tab.SETTINGS, onClick = { nav.selectTab(Tab.SETTINGS) }, icon = Icons.Rounded.Settings,    label = "设置")
+                }
             }
         }
     }
