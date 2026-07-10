@@ -749,6 +749,7 @@ class CourseSyncManager(
                     val decision = answersWithFallback(session, ctx, q, plan, opId, "$scope question ${qIndex + 1}", onEvent)
                     val answers = decision.answers
                     if (answers.isEmpty()) {
+                        hasBlankAnswer = true
                         val msg = "$scope question ${qIndex + 1} missing answer"
                         recordQuestionHistory(
                             opId = opId,
@@ -796,7 +797,23 @@ class CourseSyncManager(
                     )
                     if (scope == "exam") opts["realSubmit"] = plan.answerPolicy.realSubmitExam
                     if (plan.dryRun) opts["dryRun"] = true
-                    val result = runTaskWithChallenge(session, answerTask, opts, onEvent)
+                    var result = runTaskWithChallenge(session, answerTask, opts, onEvent)
+                    if (scope == "exam" && finalQuestion && result.status == "submit_wait") {
+                        val waitMinutes = jsonInt(result.raw, "retryAfterMinutes")
+                        require(waitMinutes > 0) { "xuexitong exam submit wait response missing retryAfterMinutes" }
+                        onEvent(
+                            SyncEvent(
+                                "warn",
+                                "考试限制开考 $waitMinutes 分钟内交卷，等待后将自动重试",
+                                session.platform,
+                            ),
+                        )
+                        sleepMillis(waitMinutes.toLong() * 60_000L)
+                        if (controller.isCancelling(opId)) return@runCatching
+                        result = runTaskWithChallenge(session, answerTask, opts, onEvent)
+                        check(result.status != "submit_wait") { "xuexitong exam is still inside the minimum submit window" }
+                    }
+                    val submittedFinal = finalQuestion && result.status.equals("submitted", ignoreCase = true)
                     recordQuestionHistory(
                         opId = opId,
                         session = session,
@@ -808,8 +825,8 @@ class CourseSyncManager(
                         total = total,
                         answers = answers,
                         answerSource = decision.source,
-                        status = if (finalQuestion) QuestionHistoryStatus.SUBMITTED else QuestionHistoryStatus.SAVED,
-                        finalSubmit = finalQuestion,
+                        status = if (submittedFinal) QuestionHistoryStatus.SUBMITTED else QuestionHistoryStatus.SAVED,
+                        finalSubmit = submittedFinal,
                         realSubmit = scope != "exam" || plan.answerPolicy.realSubmitExam,
                         message = result.status,
                     )

@@ -334,6 +334,45 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `xuexitong exam waits for minimum submit window then retries final submit`() = runTest {
+        val runner = XuexitongFlowRunner(examSubmitWaitMinutes = 5)
+        val controller = OperationController(now = { 0L })
+        val sleeps = mutableListOf<Long>()
+        val events = mutableListOf<SyncEvent>()
+        val mgr = CourseSyncManager(
+            runner,
+            controller,
+            sleepMillis = { sleeps.add(it) },
+        )
+        val plan = RunPlan(
+            planId = "xxt-exam-submit-wait",
+            platform = "xuexitong",
+            account = "stu",
+            xuexitong = XuexitongRunOptions(videoModel = 0),
+            answerPolicy = AnswerPolicy(
+                enabled = true,
+                answerMode = AnswerMode.XUEXITONG_BUILT_IN,
+                runWork = false,
+                runExam = true,
+                runChapterTest = false,
+                submitExamFinal = true,
+                realSubmitExam = true,
+            ),
+        )
+
+        mgr.run(SessionData("xuexitong", "stu"), plan, onEvent = { events.add(it) })
+
+        assertEquals(listOf(5 * 60_000L), sleeps)
+        assertEquals(2, runner.examSubmitAttempts)
+        assertEquals(2, runner.calls.count { it == "run:exam-answer:exam:true" })
+        assertTrue(events.any { it.message.contains("等待后将自动重试") })
+        val history = controller.questionHistory.value.single { it.scope == "exam" }
+        assertEquals(QuestionHistoryStatus.SUBMITTED, history.status)
+        assertTrue(history.finalSubmit)
+        assertEquals("submitted", history.message)
+    }
+
+    @Test
     fun `xuexitong work uses fallback answer when built in ai is empty`() = runTest {
         val runner = XuexitongFallbackRunner()
         val controller = OperationController(now = { 0L })
@@ -720,8 +759,11 @@ class CourseSyncManagerTest {
         assertTrue(runner.calls.contains("run:doc-1:none"))
     }
 
-    private class XuexitongFlowRunner : CourseTaskRunner {
+    private class XuexitongFlowRunner(
+        private val examSubmitWaitMinutes: Int = 0,
+    ) : CourseTaskRunner {
         val calls = mutableListOf<String>()
+        var examSubmitAttempts = 0
         private val course = CourseItem("course-1", name = "Course", platform = "xuexitong", raw = ctx())
         private val node1 = CourseItem("node-1", name = "Node 1", platform = "xuexitong", raw = ctx())
         private val node2 = CourseItem("node-2", name = "Node 2", platform = "xuexitong", raw = ctx())
@@ -770,6 +812,19 @@ class CourseSyncManagerTest {
                 "pullExamList" -> RunTaskResult("xuexitong", task.id, "ok", raw = obj("exams" to arr(obj("taskRefId" to "exam-1", "name" to "Exam"))))
                 "enterExam" -> RunTaskResult("xuexitong", task.id, "ok", raw = ctx("examRelationId" to "exam-answer", "questionTotal" to 1))
                 "examQuestion" -> RunTaskResult("xuexitong", task.id, "ok", raw = question("q-exam"))
+                "exam" -> {
+                    examSubmitAttempts++
+                    if (examSubmitWaitMinutes > 0 && examSubmitAttempts == 1) {
+                        RunTaskResult(
+                            "xuexitong",
+                            task.id,
+                            "submit_wait",
+                            raw = obj("retryAfterMinutes" to examSubmitWaitMinutes),
+                        )
+                    } else {
+                        RunTaskResult("xuexitong", task.id, "submitted")
+                    }
+                }
                 else -> RunTaskResult("xuexitong", task.id, "submitted")
             }
         }

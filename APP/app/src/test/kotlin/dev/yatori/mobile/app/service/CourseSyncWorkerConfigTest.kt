@@ -64,6 +64,35 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `xuexitong automatic submit mode authorizes final exam submit`() {
+        val policy = answerPolicyFromCoursesCustom(
+            "xuexitong",
+            JsonObject().apply {
+                addProperty("autoExam", 3)
+                addProperty("examAutoSubmit", 1)
+            },
+        )
+
+        assertTrue(policy.submitExamFinal)
+        assertFalse(policy.submitFinalWhenComplete)
+        assertTrue(policy.realSubmitExam)
+    }
+
+    @Test
+    fun `xuexitong complete-only mode authorizes submit only after completeness check`() {
+        val policy = answerPolicyFromCoursesCustom(
+            "xuexitong",
+            JsonObject().apply {
+                addProperty("autoExam", 3)
+                addProperty("examAutoSubmit", 2)
+            },
+        )
+
+        assertFalse(policy.submitExamFinal)
+        assertTrue(policy.submitFinalWhenComplete)
+        assertTrue(policy.realSubmitExam)
+    }
+    @Test
     fun `non xuexitong platforms reject xuexitong built in ai mode`() {
         val policy = answerPolicyFromCoursesCustom(
             "haiqikeji",

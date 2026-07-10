@@ -23,9 +23,30 @@ import (
 	"github.com/google/uuid"
 )
 
+const sliderMaxAttempts = 4
+
+var errSliderRejected = errors.New("xuexitong slider: verification rejected")
+
 // SliderPass solves a xuexitong slider captcha for the given captchaId and
 // referer, returning the validate token to attach to the paper-pull request.
+// A fresh challenge is fetched after a coordinate mismatch, matching the
+// console behavior without allowing an unbounded retry loop.
 func (c *XxtClient) SliderPass(captchaId, referer string) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= sliderMaxAttempts; attempt++ {
+		validate, err := c.sliderPassAttempt(captchaId, referer)
+		if err == nil {
+			return validate, nil
+		}
+		lastErr = err
+		if !errors.Is(err, errSliderRejected) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("xuexitong slider: verification rejected after %d attempts: %w", sliderMaxAttempts, lastErr)
+}
+
+func (c *XxtClient) sliderPassAttempt(captchaId, referer string) (string, error) {
 	// 1) conf: extract server time "t"
 	conf, err := c.sliderConfApi(captchaId)
 	if err != nil {
@@ -70,7 +91,7 @@ func (c *XxtClient) SliderPass(captchaId, referer string) (string, error) {
 	}
 	x := DetectSlideOffset(shade, cutout)
 
-	passResp, err := c.passSliderApi(captchaId, resp.Token, strconv.Itoa(x), "10")
+	passResp, err := c.passSliderApi(captchaId, resp.Token, strconv.Itoa(x), "10", referer)
 	if err != nil {
 		return "", err
 	}
@@ -86,7 +107,7 @@ func (c *XxtClient) SliderPass(captchaId, referer string) (string, error) {
 		return "", fmt.Errorf("xuexitong slider: pass json parse error: %w", err)
 	}
 	if !pass.Result {
-		return "", errors.New(passResp)
+		return "", fmt.Errorf("%w: %s", errSliderRejected, passResp)
 	}
 	var extra struct {
 		Validate string `json:"validate"`
@@ -100,7 +121,7 @@ func (c *XxtClient) SliderPass(captchaId, referer string) (string, error) {
 	return extra.Validate, nil
 }
 
-func (c *XxtClient) sliderGet(urlStr, host string) (string, error) {
+func (c *XxtClient) sliderGet(urlStr, referer string) (string, error) {
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return "", err
@@ -110,6 +131,9 @@ func (c *XxtClient) sliderGet(urlStr, host string) (string, error) {
 	req.Header.Add("X-Requested-With", "com.chaoxing.mobile")
 	req.Header.Add("Accept", "*/*")
 	req.Header.Add("Connection", "keep-alive")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
 	addCookies(req, c)
 	client := &http.Client{Transport: httpTransport(c)}
 	res, err := client.Do(req)
@@ -124,7 +148,7 @@ func (c *XxtClient) sliderGet(urlStr, host string) (string, error) {
 func (c *XxtClient) sliderConfApi(captchaId string) (string, error) {
 	u := "https://captcha.chaoxing.com/captcha/get/conf?callback=cx_captcha_function&captchaId=" +
 		captchaId + "&_=" + strconv.FormatInt(time.Now().UnixMilli(), 10)
-	return c.sliderGet(u, "captcha.chaoxing.com")
+	return c.sliderGet(u, "")
 }
 
 func (c *XxtClient) sliderImgApi(captchaId, serverTime, referer string) (string, error) {
@@ -137,16 +161,16 @@ func (c *XxtClient) sliderImgApi(captchaId, serverTime, referer string) (string,
 	u := "https://captcha.chaoxing.com/captcha/get/verification/image?callback=cx_captcha_function&captchaId=" +
 		captchaId + "&type=slide&version=1.1.20&captchaKey=" + captchaKey + "&token=" + token +
 		"&referer=" + url.QueryEscape(referer)
-	return c.sliderGet(u, "captcha.chaoxing.com")
+	return c.sliderGet(u, "")
 }
 
-func (c *XxtClient) passSliderApi(captchaId, token, xPoint, runEnv string) (string, error) {
+func (c *XxtClient) passSliderApi(captchaId, token, xPoint, runEnv, referer string) (string, error) {
 	u := "https://captcha.chaoxing.com/captcha/check/verification/result?callback=cx_captcha_function&captchaId=" +
 		captchaId + "&type=slide&token=" + token +
 		"&textClickArr=" + url.QueryEscape(`[{"x":`+xPoint+`}]`) +
 		"&coordinate=" + url.QueryEscape(`[]`) +
 		"&runEnv=" + runEnv + "&version=1.1.20&t=a&_=" + strconv.FormatInt(time.Now().UnixMilli(), 10)
-	return c.sliderGet(u, "captcha.chaoxing.com")
+	return c.sliderGet(u, referer)
 }
 
 func (c *XxtClient) pullSliderImg(imgUrl string) (image.Image, error) {
@@ -181,8 +205,72 @@ func (c *XxtClient) pullSliderImg(imgUrl string) (image.Image, error) {
 func DetectSlideOffset(bgImg, cutImg image.Image) int {
 	bg := toGray(bgImg)
 	cut := toGray(cutImg)
+
+	// Chaoxing places the roughly 48x54 puzzle piece on a black 56x160
+	// canvas. Matching that entire canvas makes the black padding dominate
+	// NCC and frequently selects x=0. Preserve the crop used by the original
+	// OpenCV implementation: match the piece interior against a narrow strip
+	// of the background at the same vertical position.
+	if cutoutY, ok := findCutoutTop(cut); ok {
+		template := cropGray(cut, 8, cutoutY+2, 48, cutoutY+44)
+		shadeStrip := cropGray(bg, 0, cutoutY-2, len(bg[0]), cutoutY+50)
+		if len(template) > 0 && len(template[0]) > 0 && len(shadeStrip) >= len(template) && len(shadeStrip[0]) >= len(template[0]) {
+			offsetX, _ := normCrossCorrelation(shadeStrip, template)
+			return offsetX - 5
+		}
+	}
+
+	// Defensive fallback for an unexpected image layout.
 	offsetX, _ := normCrossCorrelation(bg, cut)
 	return offsetX - 5
+}
+
+func findCutoutTop(gray [][]float64) (int, bool) {
+	if len(gray) == 0 || len(gray[0]) == 0 {
+		return 0, false
+	}
+	minPixels := len(gray[0]) / 8
+	if minPixels < 1 {
+		minPixels = 1
+	}
+	for y, row := range gray {
+		visible := 0
+		for _, pixel := range row {
+			if pixel > 10 {
+				visible++
+			}
+		}
+		if visible >= minPixels {
+			return y, true
+		}
+	}
+	return 0, false
+}
+
+func cropGray(src [][]float64, x0, y0, x1, y1 int) [][]float64 {
+	if len(src) == 0 || len(src[0]) == 0 {
+		return nil
+	}
+	if x0 < 0 {
+		x0 = 0
+	}
+	if y0 < 0 {
+		y0 = 0
+	}
+	if x1 > len(src[0]) {
+		x1 = len(src[0])
+	}
+	if y1 > len(src) {
+		y1 = len(src)
+	}
+	if x0 >= x1 || y0 >= y1 {
+		return nil
+	}
+	out := make([][]float64, y1-y0)
+	for y := y0; y < y1; y++ {
+		out[y-y0] = src[y][x0:x1]
+	}
+	return out
 }
 
 func toGray(img image.Image) [][]float64 {

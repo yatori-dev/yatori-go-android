@@ -1,6 +1,9 @@
 package mobile
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 const examSingleHTML = `
 <input type="hidden" id="questionId" value="Q9">
@@ -103,5 +106,24 @@ func TestGetExamSignature(t *testing.T) {
 	}
 	if rd, ok := sig["rd"].(float64); !ok || rd < 0 || rd >= 1 {
 		t.Fatalf("rd=%v should be in [0,1)", sig["rd"])
+	}
+}
+func TestExamSubmitReferer(t *testing.T) {
+	e := &ExamSubmitEntity{
+		CourseId: "C1", ClassId: "CL1", Cpi: "9", Tid: "T1", AnswerId: "A1",
+		RemainTimeParam: "R1", Enc: "ENC1",
+	}
+	u, err := url.Parse(examSubmitReferer(e, 123456789))
+	if err != nil {
+		t.Fatalf("parse referer: %v", err)
+	}
+	q := u.Query()
+	for key, want := range map[string]string{
+		"courseId": "C1", "classId": "CL1", "cpi": "9", "tId": "T1", "id": "A1",
+		"remainTimeParam": "R1", "enc": "ENC1", "relationAnswerLastUpdateTime": "123456789",
+	} {
+		if got := q.Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
 	}
 }

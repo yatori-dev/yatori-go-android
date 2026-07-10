@@ -5,6 +5,9 @@ package mobilecore
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	xxtmobile "github.com/yatori-dev/yatori-go-mobile-core/api/xuexitong/mobile"
 )
@@ -231,12 +234,21 @@ func xxtSubmitExam(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if err != nil {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: exam submit failed: %w", err)
 	}
-	var resp struct {
-		Status interface{} `json:"status"`
-		Msg    string      `json:"msg"`
+	resp, parseErr := parseXxtExamSubmitResponse(raw)
+	if isSubmit && resp.RetryAfterMinutes > 0 {
+		return RunTaskResult{
+			Platform: "xuexitong", TaskID: in.Submit.QuestionId, Status: "submit_wait",
+			Message: resp.Message,
+			Raw: map[string]interface{}{
+				"isSubmit": true, "realSubmit": true, "message": resp.Message, "raw": raw,
+				"retryAfterMinutes": resp.RetryAfterMinutes,
+			},
+		}, nil
 	}
-	_ = json.Unmarshal([]byte(raw), &resp)
-	if resp.Status == false {
+	if parseErr != nil {
+		return RunTaskResult{}, fmt.Errorf("xuexitong: exam submit response invalid: %w; raw=%s", parseErr, raw)
+	}
+	if !resp.Accepted {
 		return RunTaskResult{}, fmt.Errorf("xuexitong: exam submit rejected: %s", raw)
 	}
 	status := "saved"
@@ -245,9 +257,67 @@ func xxtSubmitExam(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	}
 	return RunTaskResult{
 		Platform: "xuexitong", TaskID: in.Submit.QuestionId, Status: status,
-		Message: resp.Msg,
-		Raw:     map[string]interface{}{"isSubmit": isSubmit, "realSubmit": true, "message": resp.Msg, "raw": raw},
+		Message: resp.Message,
+		Raw:     map[string]interface{}{"isSubmit": isSubmit, "realSubmit": true, "message": resp.Message, "raw": raw},
 	}, nil
+}
+
+var xxtExamMinimumSubmitTimeRE = regexp.MustCompile(`考试\s*(\d+)\s*分钟内不允许提交考试`)
+
+type xxtExamSubmitResponse struct {
+	Accepted          bool
+	Message           string
+	RetryAfterMinutes int
+}
+
+func parseXxtExamSubmitResponse(raw string) (xxtExamSubmitResponse, error) {
+	var payload struct {
+		Status interface{} `json:"status"`
+		Msg    string      `json:"msg"`
+	}
+	jsonErr := json.Unmarshal([]byte(raw), &payload)
+	searchText := raw
+	if jsonErr == nil && payload.Msg != "" {
+		searchText += "\n" + payload.Msg
+	}
+	if match := xxtExamMinimumSubmitTimeRE.FindStringSubmatch(searchText); len(match) == 2 {
+		minutes, err := strconv.Atoi(match[1])
+		if err == nil && minutes > 0 {
+			return xxtExamSubmitResponse{Message: payload.Msg, RetryAfterMinutes: minutes}, nil
+		}
+	}
+	if jsonErr != nil {
+		return xxtExamSubmitResponse{}, jsonErr
+	}
+	accepted, ok := xxtExamStatusBool(payload.Status)
+	if !ok {
+		return xxtExamSubmitResponse{Message: payload.Msg}, fmt.Errorf("missing or invalid status %v", payload.Status)
+	}
+	return xxtExamSubmitResponse{Accepted: accepted, Message: payload.Msg}, nil
+}
+
+func xxtExamStatusBool(value interface{}) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "success", "ok", "1":
+			return true, true
+		case "false", "fail", "failed", "error", "0":
+			return false, true
+		default:
+			return false, false
+		}
+	case float64:
+		if typed == 0 {
+			return false, true
+		}
+		if typed == 1 {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 func parseXxtExamSubmit(v interface{}) (xxtExamSubmitInput, error) {

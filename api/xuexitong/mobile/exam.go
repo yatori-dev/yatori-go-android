@@ -154,6 +154,7 @@ func (c *XxtClient) SubmitExamAnswerApi(e *ExamSubmitEntity, options, hostAnswer
 	req.Header.Add("Origin", "https://mooc1-api.chaoxing.com")
 	req.Header.Add("X-Requested-With", "XMLHttpRequest")
 	req.Header.Add("Accept-Language", "zh-CN,en-US;q=0.9")
+	req.Header.Add("Referer", examSubmitReferer(e, time.Now().UnixMilli()))
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	req.Header.Add("Connection", "keep-alive")
 	addCookies(req, c)
@@ -164,6 +165,27 @@ func (c *XxtClient) SubmitExamAnswerApi(e *ExamSubmitEntity, options, hostAnswer
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
 	return string(body), err
+}
+
+func examSubmitReferer(e *ExamSubmitEntity, relationAnswerLastUpdateTime int64) string {
+	q := url.Values{}
+	q.Set("keyboardDisplayRequiresUserAction", "1")
+	q.Set("courseId", e.CourseId)
+	q.Set("classId", e.ClassId)
+	q.Set("source", "0")
+	q.Set("imei", xxtIMEI)
+	q.Set("tId", e.Tid)
+	q.Set("id", e.AnswerId)
+	q.Set("p", "1")
+	q.Set("start", "1")
+	q.Set("cpi", e.Cpi)
+	q.Set("isphone", "true")
+	q.Set("monitorStatus", "0")
+	q.Set("monitorOp", "-1")
+	q.Set("remainTimeParam", e.RemainTimeParam)
+	q.Set("relationAnswerLastUpdateTime", strconv.FormatInt(relationAnswerLastUpdateTime, 10))
+	q.Set("enc", e.Enc)
+	return "https://mooc1-api.chaoxing.com/exam-ans/exam/test/reVersionTestStartNew?" + q.Encode()
 }
 
 // ExamAnswerForm builds the exam submit form body (per-type answer encoding).

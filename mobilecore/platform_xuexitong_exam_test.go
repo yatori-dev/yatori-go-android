@@ -179,3 +179,111 @@ func TestRunTaskXuexitong_ExamRealSubmit(t *testing.T) {
 		t.Fatalf("status=%q want submitted", res.Status)
 	}
 }
+
+func TestRunTaskXuexitong_ExamMinimumSubmitWait(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtExamSubmitProvider
+	xxtExamSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ExamSubmitEntity, _, _ []string, _ bool) (string, error) {
+		return `{"status":false,"msg":"考试5分钟内不允许提交考试"}`, nil
+	}
+	defer func() { xxtExamSubmitProvider = orig }()
+
+	q := `{"submit":{"questionId":"Q9","typeCode":"0","userId":"U1"},"options":["A2","B3"],"answers":["3"]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"exam","realSubmit":true,"isSubmit":true,"question":` + q + `}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("minimum submit window should be returned as a retryable result: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	_ = json.Unmarshal(b, &res)
+	if res.Status != "submit_wait" || res.Raw["retryAfterMinutes"] != float64(5) {
+		t.Fatalf("status=%q raw=%v, want submit_wait/5", res.Status, res.Raw)
+	}
+}
+
+func TestRunTaskXuexitong_ExamRejectsUnparseableResponse(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtExamSubmitProvider
+	xxtExamSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ExamSubmitEntity, _, _ []string, _ bool) (string, error) {
+		return `<html>verification failed</html>`, nil
+	}
+	defer func() { xxtExamSubmitProvider = orig }()
+
+	q := `{"submit":{"questionId":"Q9","typeCode":"0","userId":"U1"},"options":["A2","B3"],"answers":["3"]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"exam","realSubmit":true,"isSubmit":true,"question":` + q + `}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if e.OK {
+		t.Fatal("an unparseable server response must not be reported as submitted")
+	}
+}
+func TestRunTaskXuexitong_ExamRejectsStringFalseStatus(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtExamSubmitProvider
+	xxtExamSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ExamSubmitEntity, _, _ []string, _ bool) (string, error) {
+		return `{"status":"false","msg":"submit rejected"}`, nil
+	}
+	defer func() { xxtExamSubmitProvider = orig }()
+
+	q := `{"submit":{"questionId":"Q9","typeCode":"0","userId":"U1"},"options":["A2","B3"],"answers":["3"]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"exam","realSubmit":true,"isSubmit":true,"question":` + q + `}}`
+	if e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON)); e.OK {
+		t.Fatal("string status=false must not be reported as submitted")
+	}
+}
+func TestRunTaskXuexitong_ExamAcceptsRealSuccessStatusForQuestionSave(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	var tempSaveSeen bool
+	orig := xxtExamSubmitProvider
+	xxtExamSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ExamSubmitEntity, _, _ []string, tempSave bool) (string, error) {
+		tempSaveSeen = tempSave
+		return `{"msg":"提交成功","realRemainTime":1758,"data":"1783683156124|1766|aaea24612dfbdf3ff0224720122937df","monitorparam":{"duration":7951,"submitTime":1783683156124,"questionId":"885624922","answer":"A","questionNo":1,"beginTime":1783683148173,"questionType":0},"status":"success"}`, nil
+	}
+	defer func() { xxtExamSubmitProvider = orig }()
+
+	q := `{"submit":{"questionId":"885624922","typeCode":"0","userId":"U1"},"options":["A","B"],"answers":["A"]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"exam","realSubmit":true,"isSubmit":false,"question":` + q + `}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("status=success question save should succeed: %s", e.Error)
+	}
+	if !tempSaveSeen {
+		t.Fatal("non-final question must use tempSave=true")
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	_ = json.Unmarshal(b, &res)
+	if res.Status != "saved" || res.Message != "提交成功" {
+		t.Fatalf("status=%q message=%q, want saved/提交成功", res.Status, res.Message)
+	}
+}
+
+func TestRunTaskXuexitong_ExamAcceptsRealSuccessStatusForFinalSubmit(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := xxtExamSubmitProvider
+	xxtExamSubmitProvider = func(_ *xxtmobile.XxtClient, _ *xxtmobile.ExamSubmitEntity, _, _ []string, tempSave bool) (string, error) {
+		if tempSave {
+			t.Fatal("final question must use tempSave=false")
+		}
+		return `{"msg":"提交成功","status":"success"}`, nil
+	}
+	defer func() { xxtExamSubmitProvider = orig }()
+
+	q := `{"submit":{"questionId":"Q10","typeCode":"0","userId":"U1"},"options":["A","B"],"answers":["A"]}`
+	taskJSON := `{"platform":"xuexitong","raw":{},"options":{"action":"exam","realSubmit":true,"isSubmit":true,"question":` + q + `}}`
+	e := parseEnvelope(t, RunTask(xxtWorkSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("status=success final submit should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	_ = json.Unmarshal(b, &res)
+	if res.Status != "submitted" {
+		t.Fatalf("status=%q, want submitted", res.Status)
+	}
+}
