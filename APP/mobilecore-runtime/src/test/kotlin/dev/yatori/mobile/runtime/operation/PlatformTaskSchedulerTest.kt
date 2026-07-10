@@ -227,6 +227,36 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `yinghua video is not truncated by generic max tick limit`() = runTest {
+        val session = SessionData("yinghua", "stu")
+        val task = TaskItem("long-video", name = "long video", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("videoDuration", 1_210)
+            addProperty("viewedDuration", 1_200)
+        })
+        gateway.results.add(RunTaskResult("yinghua", "long-video", "started", raw = JsonObject().apply {
+            addProperty("studyId", "study-1")
+            addProperty("videoDuration", 1_210)
+        }))
+        gateway.results.add(RunTaskResult("yinghua", "long-video", "submitted", raw = JsonObject().apply {
+            addProperty("studyId", "study-1")
+            addProperty("studyTime", 1_205)
+            addProperty("videoDuration", 1_210)
+        }))
+        gateway.results.add(RunTaskResult("yinghua", "long-video", "submitted", raw = JsonObject().apply {
+            addProperty("studyId", "study-2")
+            addProperty("studyTime", 1_210)
+            addProperty("videoDuration", 1_210)
+        }))
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 1, videoModel = 2))
+
+        assertEquals("submitted", result.status)
+        assertEquals(listOf(1_205, 1_210), gateway.options.drop(1).map { it["studyTime"] })
+        assertEquals(1_210.0, store.loadActionState("yinghua", "stu", "long-video", "yinghua-progress")!!.progress)
+    }
+
+    @Test
     fun `xuexitong document scheduler drives prepare and submit`() = runTest {
         val session = SessionData("xuexitong", "stu")
         val task = TaskItem("doc1", name = "doc", type = "document", platform = "xuexitong")

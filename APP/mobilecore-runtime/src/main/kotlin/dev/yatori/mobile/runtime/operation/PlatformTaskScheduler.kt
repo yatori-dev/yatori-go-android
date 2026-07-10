@@ -330,7 +330,10 @@ class PlatformTaskScheduler(
         val total = durationSeconds(started.task.raw, "videoDuration", "duration", "timeLength", "videoLength").takeIf { it > 0 } ?: 5
         var position = durationSeconds(started.task.raw, "viewedDuration").coerceAtLeast(0)
         if (position >= total) return RunTaskResult(session.platform, task.id, "done", raw = started.raw)
-        val ticks = min(options.maxTicksPerTask, max(1, ceil((total - position).coerceAtLeast(0) / 5.0).toInt()))
+        // The console runs until the full video duration is reached. Capping this loop at the
+        // generic maxTicksPerTask (240 by default) silently stopped Yinghua videos after 20 minutes
+        // and still returned "submitted", so the batch layer persisted them as completed.
+        val ticks = max(1, ceil((total - position).coerceAtLeast(0) / 5.0).toInt())
         var last = RunTaskResult(session.platform, task.id, "started", raw = started.raw)
         for (i in 1..ticks) {
             if (shouldCancel()) return last

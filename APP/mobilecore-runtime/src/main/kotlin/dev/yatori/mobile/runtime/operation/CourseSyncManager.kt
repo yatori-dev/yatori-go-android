@@ -307,7 +307,12 @@ class CourseSyncManager(
                     if (controller.isCancelling(opId)) return@async
                     val tasks = runCatching { runner.getTasks(session, course) }.getOrElse { return@async }
                     val videoTasks = tasks.filter {
-                        it.type.equals("video", true) && !it.isFinished() && it.id !in plan.completedTaskIds
+                        // A Yinghua chapter node may carry video together with work/exam tabs. The
+                        // Go adapter keeps those capabilities in raw; type alone represents only one
+                        // of them, so filtering only type=video drops the video part of mixed nodes.
+                        val hasVideo = it.type.equals("video", true) ||
+                            runCatching { it.raw.get("tabVideo")?.asBoolean == true }.getOrDefault(false)
+                        hasVideo && !it.isFinished() && it.id !in plan.completedTaskIds
                     }
                     onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 暴力模式 ${videoTasks.size} 个视频任务", session.platform))
                     coroutineScope {

@@ -7,6 +7,7 @@ import dev.yatori.mobile.api.dto.RunTaskResult
 import dev.yatori.mobile.api.dto.SessionData
 import dev.yatori.mobile.api.dto.TaskItem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -51,6 +52,28 @@ class CourseSyncManagerTest {
         }
     }
 
+    private class ConcurrentYinghuaPlatformRunner : PlatformTaskRunner {
+        val videoModels = mutableListOf<Int>()
+        var active = 0
+        var maxActive = 0
+
+        override fun supports(session: SessionData, task: TaskItem): Boolean = true
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            videoModels.add(options.videoModel)
+            active += 1
+            maxActive = maxOf(maxActive, active)
+            delay(1)
+            active -= 1
+            return RunTaskResult(session.platform, task.id, "submitted")
+        }
+    }
     private class ResultStatusRunner(
         private val platform: String,
         statuses: List<String>,
@@ -182,6 +205,50 @@ class CourseSyncManagerTest {
 
         assertEquals(setOf("result-0", "result-1"), submitted.toSet())
         assertEquals(runner.tasks.map { it.id }.toSet(), platformRunner.executed.toSet())
+    }
+
+    @Test
+    fun yinghuaViolenceModeRunsVideoNodesConcurrently() = runTest {
+        val runner = FakeRunner(
+            courses = listOf(course("violence-course", "violence course")),
+            tasksByCourse = mapOf("violence-course" to listOf(
+                TaskItem("video-1", name = "video 1", type = "video", platform = "yinghua"),
+                TaskItem("video-2", name = "video 2", type = "video", platform = "yinghua"),
+            )),
+        )
+        val platformRunner = ConcurrentYinghuaPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("yinghua-mode2-concurrent", "yinghua", "stu", yinghuaVideoModel = 2),
+        )
+
+        assertEquals(setOf("video-1", "video-2"), submitted.toSet())
+        assertTrue(platformRunner.maxActive >= 2)
+        assertEquals(listOf(2, 2), platformRunner.videoModels)
+    }
+
+    @Test
+    fun yinghuaViolenceModeIncludesVideoCapabilityOnMixedNode() = runTest {
+        val mixed = TaskItem("mixed-node", name = "submitted", type = "exam", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("tabVideo", true)
+            addProperty("tabExam", true)
+        })
+        val runner = FakeRunner(
+            courses = listOf(course("mixed-course", "mixed course")),
+            tasksByCourse = mapOf("mixed-course" to listOf(mixed)),
+        )
+        val platformRunner = ResultStatusPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("mixed-yinghua-mode2", "yinghua", "stu", yinghuaVideoModel = 2),
+        )
+
+        assertEquals(listOf("mixed-node"), submitted)
+        assertEquals(listOf("mixed-node"), platformRunner.executed)
     }
 
     @Test
