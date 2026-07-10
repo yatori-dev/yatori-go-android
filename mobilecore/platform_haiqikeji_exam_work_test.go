@@ -228,15 +228,16 @@ func TestRunTaskHaiqikeji_WorkSubmit_MissingAnswers(t *testing.T) {
 	}
 }
 
-// --- exam: dry-run by default, real submit only when realSubmit=true ---
+// --- exam: save answers by default; dryRun remains side-effect free ---
 
-func TestRunTaskHaiqikeji_ExamDryRunDefault(t *testing.T) {
+func TestRunTaskHaiqikeji_ExamSaveDefault(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
-	// exam-answer provider must NOT be called on default dry-run; error proves it.
+	var calls []map[string]string
 	orig := hqkjExamAnswerProvider
-	hqkjExamAnswerProvider = func(_ *haiqikejiApi.HqkjUserCache, _, _, _, _, _, _, _ string, _ []string) (string, error) {
-		return "", errors.New("exam submit must not be called in dry-run")
+	hqkjExamAnswerProvider = func(_ *haiqikejiApi.HqkjUserCache, courseID, examID, topicID, recordID, wrID, waID, qType string, answers []string) (string, error) {
+		calls = append(calls, map[string]string{"examId": examID, "topicId": topicID, "type": qType, "answer": strings.Join(answers, ",")})
+		return `{"code":200,"msg":"保存成功"}`, nil
 	}
 	defer func() { hqkjExamAnswerProvider = orig }()
 
@@ -244,7 +245,36 @@ func TestRunTaskHaiqikeji_ExamDryRunDefault(t *testing.T) {
 	taskJSON := `{"platform":"haiqikeji","id":"2022","raw":{"courseId":"c1"},"options":{"action":"exam","answers":` + answers + `}}`
 	e := parseEnvelope(t, RunTask(hqkjEwSessJSON, taskJSON))
 	if !e.OK {
-		t.Fatalf("exam dry-run should succeed: %s", e.Error)
+		t.Fatalf("exam save should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "saved" {
+		t.Fatalf("status=%q want saved", res.Status)
+	}
+	if res.Raw["realSubmit"] != false {
+		t.Fatalf("raw.realSubmit=%v want false", res.Raw["realSubmit"])
+	}
+	if len(calls) != 1 || calls[0]["answer"] != "B" {
+		t.Fatalf("unexpected exam save calls: %v", calls)
+	}
+}
+
+func TestRunTaskHaiqikeji_ExamExplicitDryRunDoesNotSave(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := hqkjExamAnswerProvider
+	hqkjExamAnswerProvider = func(_ *haiqikejiApi.HqkjUserCache, _, _, _, _, _, _, _ string, _ []string) (string, error) {
+		return "", errors.New("exam answer provider must not be called in explicit dry-run")
+	}
+	defer func() { hqkjExamAnswerProvider = orig }()
+
+	answers := `[{"topicId":"5001","recordId":"33","type":1,"answers":["文本答案"]}]`
+	taskJSON := `{"platform":"haiqikeji","id":"2022","raw":{"courseId":"c1"},"options":{"action":"exam","dryRun":true,"answers":` + answers + `}}`
+	e := parseEnvelope(t, RunTask(hqkjEwSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("explicit exam dry-run should succeed: %s", e.Error)
 	}
 	b, _ := json.Marshal(e.Data)
 	var res RunTaskResult
@@ -252,8 +282,30 @@ func TestRunTaskHaiqikeji_ExamDryRunDefault(t *testing.T) {
 	if res.Status != "dry_run" {
 		t.Fatalf("status=%q want dry_run", res.Status)
 	}
-	if res.Raw["realSubmit"] != false {
-		t.Fatalf("raw.realSubmit=%v want false", res.Raw["realSubmit"])
+}
+
+func TestRunTaskHaiqikeji_ExamSaveTextAnswers(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	var calls []map[string]string
+	orig := hqkjExamAnswerProvider
+	hqkjExamAnswerProvider = func(_ *haiqikejiApi.HqkjUserCache, courseID, examID, topicID, recordID, wrID, waID, qType string, answers []string) (string, error) {
+		calls = append(calls, map[string]string{"topicId": topicID, "type": qType, "answer": strings.Join(answers, "|||")})
+		return `{"code":200,"msg":"保存成功"}`, nil
+	}
+	defer func() { hqkjExamAnswerProvider = orig }()
+
+	answers := `[` +
+		`{"topicId":"fill-1","type":4,"answers":["北京"]},` +
+		`{"topicId":"short-1","type":5,"answers":["因为地球自转"]}` +
+		`]`
+	taskJSON := `{"platform":"haiqikeji","id":"2022","raw":{"courseId":"c1"},"options":{"action":"exam","answers":` + answers + `}}`
+	e := parseEnvelope(t, RunTask(hqkjEwSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("exam text-answer save should succeed: %s", e.Error)
+	}
+	if len(calls) != 2 || calls[0]["type"] != "4" || calls[0]["answer"] != "北京" || calls[1]["type"] != "5" || calls[1]["answer"] != "因为地球自转" {
+		t.Fatalf("text answers must pass through unchanged: %v", calls)
 	}
 }
 

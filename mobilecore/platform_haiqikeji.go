@@ -126,6 +126,10 @@ func getTasksHaiqikeji(sess SessionData, input CourseInput) (TaskListResult, err
 				if v, ok := jFloat(nd["nodeLock"]); ok {
 					nodeLock = int(v)
 				}
+				tabVideo := nodeCapability(nd, "tabVideo")
+				tabFile := nodeCapability(nd, "tabFile")
+				tabExam := nodeCapability(nd, "tabExam")
+				tabWork := nodeCapability(nd, "tabWork")
 				tasks = append(tasks, TaskItem{
 					ID:   id,
 					Name: name,
@@ -134,6 +138,10 @@ func getTasksHaiqikeji(sess SessionData, input CourseInput) (TaskListResult, err
 						"courseId":      input.ID,
 						"videoDuration": videoDuration,
 						"nodeLock":      nodeLock,
+						"tabVideo":      tabVideo,
+						"tabFile":       tabFile,
+						"tabExam":       tabExam,
+						"tabWork":       tabWork,
 					},
 				})
 			}
@@ -142,17 +150,24 @@ func getTasksHaiqikeji(sess SessionData, input CourseInput) (TaskListResult, err
 	return TaskListResult{Platform: "haiqikeji", ParentID: input.ID, Tasks: tasks}, nil
 }
 
+func nodeCapability(nd map[string]interface{}, key string) int {
+	if value, ok := jFloat(nd[key]); ok && value > 0 {
+		return int(value)
+	}
+	return 0
+}
+
 func nodeType(nd map[string]interface{}) string {
-	if v, _ := nd["tabVideo"].(float64); v > 0 {
+	if nodeCapability(nd, "tabVideo") > 0 {
 		return "video"
 	}
-	if v, _ := nd["tabFile"].(float64); v == 1 {
+	if nodeCapability(nd, "tabFile") > 0 {
 		return "document"
 	}
-	if v, _ := nd["tabExam"].(float64); v == 1 {
+	if nodeCapability(nd, "tabExam") > 0 {
 		return "exam"
 	}
-	if v, _ := nd["tabWork"].(float64); v == 1 {
+	if nodeCapability(nd, "tabWork") > 0 {
 		return "work"
 	}
 	return ""
@@ -712,9 +727,9 @@ func hqkjRunWork(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	}, nil
 }
 
-// hqkjRunExam (action="exam") prepares/submits host-supplied answers for an exam.
-// DEFAULT dry-run: never submits unless options.realSubmit==true (the exam pull
-// endpoint is rewritten-but-unverified; exams typically cannot be retaken).
+// hqkjRunExam (action="exam") saves host-supplied answers one topic at a time.
+// Explicit options.dryRun remains side-effect free. options.realSubmit only preserves
+// the existing caller-visible status; no final-submit endpoint is invoked here.
 func hqkjRunExam(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	courseID := strOf(input.Raw["courseId"])
 	examID := input.ID
@@ -732,13 +747,7 @@ func hqkjRunExam(sess SessionData, input TaskInput) (RunTaskResult, error) {
 		return RunTaskResult{Platform: "haiqikeji", TaskID: examID, Status: "dry_run",
 			Message: fmt.Sprintf("action=exam answers=%d", len(answers))}, nil
 	}
-	if !optBool(input.Options["realSubmit"], false) {
-		return RunTaskResult{
-			Platform: "haiqikeji", TaskID: examID, Status: "dry_run",
-			Message: fmt.Sprintf("exam dry-run (set options.realSubmit=true to submit); prepared=%d", len(answers)),
-			Raw:     map[string]interface{}{"prepared": len(answers), "realSubmit": false},
-		}, nil
-	}
+	realSubmit := optBool(input.Options["realSubmit"], false)
 	cache := hqkjCachePre(sess, input)
 	ok := 0
 	for _, a := range answers {
@@ -756,9 +765,17 @@ func hqkjRunExam(sess SessionData, input TaskInput) (RunTaskResult, error) {
 		}
 		ok++
 	}
+	status := "saved"
+	message := fmt.Sprintf("saved=%d/%d realSubmit=false", ok, len(answers))
+	rawResult := map[string]interface{}{"saved": ok, "total": len(answers), "realSubmit": false}
+	if realSubmit {
+		status = "submitted"
+		message = fmt.Sprintf("submitted=%d/%d realSubmit=true", ok, len(answers))
+		rawResult = map[string]interface{}{"submitted": ok, "total": len(answers), "realSubmit": true}
+	}
 	return RunTaskResult{
-		Platform: "haiqikeji", TaskID: examID, Status: "submitted",
-		Message: fmt.Sprintf("submitted=%d/%d realSubmit=true", ok, len(answers)),
-		Raw:     map[string]interface{}{"submitted": ok, "total": len(answers), "realSubmit": true},
+		Platform: "haiqikeji", TaskID: examID, Status: status,
+		Message: message,
+		Raw:     rawResult,
 	}, nil
 }

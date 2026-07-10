@@ -24,7 +24,7 @@ const (
 
 // 作业/考试条目。
 type HqkjQuiz struct {
-	ID    string `json:"id"`    // workId 或 examId
+	ID    string `json:"id"` // workId 或 examId
 	Title string `json:"title"`
 }
 
@@ -234,11 +234,21 @@ type hqkjEnvelope struct {
 
 func fmtIntF(v float64) string { return strconv.Itoa(int(v)) }
 
+func validateHqkjEnvelope(env hqkjEnvelope, operation string) error {
+	if env.Code != 200 {
+		return fmt.Errorf("haiqikeji: %s failed (code=%d): %s", operation, env.Code, env.Msg)
+	}
+	return nil
+}
+
 // ParseQuizList 解析作业/考试列表。kind="work" 取 workInfo/workId；kind="exam" 取 examInfo/examId。
 func ParseQuizList(raw, kind string) ([]HqkjQuiz, error) {
 	var env hqkjEnvelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
 		return nil, fmt.Errorf("haiqikeji: quiz list parse error: %w", err)
+	}
+	if err := validateHqkjEnvelope(env, "quiz list"); err != nil {
+		return nil, err
 	}
 	arr := env.Data.WorkInfo
 	if kind == "exam" {
@@ -263,6 +273,9 @@ func ParseDetailRecords(raw string) ([]HqkjRecord, error) {
 	var env hqkjEnvelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
 		return nil, fmt.Errorf("haiqikeji: detail parse error: %w", err)
+	}
+	if err := validateHqkjEnvelope(env, "detail"); err != nil {
+		return nil, err
 	}
 	arr := env.Data.WorkDetail
 	if len(arr) == 0 {
@@ -293,6 +306,9 @@ func ParseStartQuestions(raw string) ([]HqkjTopic, error) {
 	var env hqkjEnvelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
 		return nil, fmt.Errorf("haiqikeji: questions parse error: %w", err)
+	}
+	if err := validateHqkjEnvelope(env, "questions"); err != nil {
+		return nil, err
 	}
 	arr := env.Data.WorkTopics
 	if len(arr) == 0 {
@@ -331,7 +347,7 @@ func ParseStartQuestions(raw string) ([]HqkjTopic, error) {
 			t.Options = append(t.Options, o.Answer)
 			t.OptionIdx = append(t.OptionIdx, o.Idx)
 		}
-		if t.TopicID != "" && len(t.Options) > 0 {
+		if t.TopicID != "" && (len(t.Options) > 0 || t.Type == HqkjTypeFill || t.Type == HqkjTypeShort) {
 			out = append(out, t)
 		}
 	}
@@ -365,16 +381,19 @@ func stripHTML(s string) string {
 
 // --- 答案格式化（确定性；AI 留在宿主） ---
 
-// FormatHqkjAnswer 把宿主给回的「答案文本」转换为海旗服务端要的提交格式。
-// 选择题(单选/多选/判断)：把每个答案文本用相似度匹配到最接近选项，取其服务端 idx；
-// 填空/简答：原样透传文本。选择题匹配不到时兜底取第一个 idx。
+// FormatHqkjAnswer 把宿主给回的答案转换为海旗服务端要的提交格式。
+// 选择题(单选/多选/判断)：若答案已经是服务端 idx 则原样保留，否则把答案文本
+// 用相似度匹配到最接近选项；填空/简答原样透传文本。
 func FormatHqkjAnswer(qType int, options, optionIdx, hostAnswers []string) []string {
 	switch qType {
 	case HqkjTypeSingle, HqkjTypeMulti, HqkjTypeJudge:
 		out := make([]string, 0)
 		used := make([]string, 0)
 		for _, ans := range hostAnswers {
-			idx := matchOptionIdx(ans, options, optionIdx, used)
+			idx := directOptionIdx(ans, optionIdx, used)
+			if idx == "" {
+				idx = matchOptionIdx(ans, options, optionIdx, used)
+			}
 			if idx != "" {
 				out = append(out, idx)
 				used = append(used, idx)
@@ -389,6 +408,16 @@ func FormatHqkjAnswer(qType int, options, optionIdx, hostAnswers []string) []str
 		out = append(out, hostAnswers...)
 		return out
 	}
+}
+
+func directOptionIdx(answer string, optionIdx, used []string) string {
+	answer = strings.TrimSpace(answer)
+	for _, idx := range optionIdx {
+		if strings.EqualFold(answer, strings.TrimSpace(idx)) && !containsStr(used, idx) {
+			return idx
+		}
+	}
+	return ""
 }
 
 // matchOptionIdx 用编辑距离相似度把答案文本匹配回选项 idx，跳过已选 idx。

@@ -13,6 +13,7 @@ import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class PlatformTaskSchedulerTest {
     private lateinit var tmp: File
@@ -282,6 +283,32 @@ class PlatformTaskSchedulerTest {
         assertEquals("done", result.status)
         assertEquals(listOf("getProgress", "start", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
         assertEquals(100, gateway.options[2]["progress"])
+    }
+
+    @Test
+    fun `haiqikeji fast mode ends the session when submit fails`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 30)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+        ).forEach(gateway.results::add)
+        gateway.failAction = "submit"
+
+        assertFailsWith<IllegalStateException> {
+            taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 2))
+        }
+
+        assertEquals(listOf("getProgress", "start", "submit", "end"), gateway.options.map { it["action"] })
     }
 
     @Test
@@ -561,6 +588,7 @@ class PlatformTaskSchedulerTest {
         val sleeps = mutableListOf<Long>()
         val sleepCountsAtCalls = mutableListOf<Int>()
         var loginCalls = 0
+        var failAction: String? = null
 
         override suspend fun init(baseDir: String) = InitResult(baseDir, "fake")
         override suspend fun healthCheck() = HealthInfo("fake", "go0", true, true)
@@ -582,6 +610,7 @@ class PlatformTaskSchedulerTest {
             this.options.add(options)
             tasks.add(task)
             sleepCountsAtCalls.add(sleeps.size)
+            if (failAction != null && options["action"] == failAction) error("failed ${options["action"]}")
             return results.removeFirst()
         }
         override suspend fun getLogs(cursor: String) = LogResult("", "", false, emptyList())

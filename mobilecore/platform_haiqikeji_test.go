@@ -420,6 +420,35 @@ func TestGetTasksHaiqikeji_DetailEchoWorks(t *testing.T) {
 	}
 }
 
+func TestGetTasksHaiqikeji_PreservesMixedNodeCapabilities(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	raw := `{"code":200,"data":[{"children":[{"id":101,"name":"混合节点","tabVideo":1,"tabFile":0,"tabExam":2,"tabWork":3}]}]}`
+	restore := fakeHqkjNodeProvider(raw)
+	defer restore()
+
+	e := parseEnvelope(t, GetTasks(
+		`{"platform":"haiqikeji","token":"tok","extra":{"schoolId":"s1","userId":"u1","preUrl":"http://x"}}`,
+		`{"platform":"haiqikeji","id":"c1","raw":{"courseId":"c1"}}`,
+	))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var result TaskListResult
+	json.Unmarshal(b, &result)
+	if len(result.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(result.Tasks))
+	}
+	task := result.Tasks[0]
+	if task.Type != "video" {
+		t.Fatalf("primary type=%q want video", task.Type)
+	}
+	if task.Raw["tabVideo"] != float64(1) || task.Raw["tabExam"] != float64(2) || task.Raw["tabWork"] != float64(3) {
+		t.Fatalf("mixed capabilities were not preserved: %v", task.Raw)
+	}
+}
+
 // --- host-driven action primitives ---
 
 func TestRunTaskHaiqikeji_ActionStart(t *testing.T) {

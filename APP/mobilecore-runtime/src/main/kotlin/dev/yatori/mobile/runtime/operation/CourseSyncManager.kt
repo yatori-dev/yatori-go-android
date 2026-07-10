@@ -14,8 +14,11 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Collections
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.time.LocalDate
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 interface CourseTaskRunner {
     suspend fun getCourses(session: SessionData): List<CourseItem>
@@ -181,6 +184,24 @@ class CourseSyncManager(
                         else -> runYinghuaSequentialCourses(session, plan, opId, courses, emit)
                     }
                 })
+                controller.markDone(
+                    opId,
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
+                )
+                return submitted
+            }
+
+            // Haiqikeji nodes can carry video/work/exam capabilities together. Keep all learning
+            // modes on a dedicated two-phase path so primary type/video completion cannot hide
+            // answer tabs: finish the course's videos first, then process work/exam capabilities.
+            if (session.platform == "haiqikeji" && (platformRunner != null || plan.answerPolicy.enabled)) {
+                submitted.addAll(
+                    if (plan.haiqikejiVideoModel == 2 && platformRunner != null) {
+                        runHaiqikejiMode2Courses(session, plan, opId, courses, emit)
+                    } else {
+                        runHaiqikejiSequentialCourses(session, plan, opId, courses, emit)
+                    },
+                )
                 controller.markDone(
                     opId,
                     detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
@@ -402,6 +423,172 @@ class CourseSyncManager(
             }
         }
         return submitted
+    }
+
+    private fun TaskItem.hasHaiqikejiCapability(capability: String): Boolean {
+        if (type.equals(capability, ignoreCase = true)) return true
+        val rawKey = when (capability.lowercase()) {
+            "video" -> "tabVideo"
+            "work" -> "tabWork"
+            "exam" -> "tabExam"
+            else -> return false
+        }
+        return jsonInt(raw, rawKey) > 0
+    }
+
+    /** Normal/answer-only Haiqikeji flow: finish each course's videos before any answer tab. */
+    private suspend fun runHaiqikejiSequentialCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val submitted = ArrayList<String>()
+        for (course in courses) {
+            if (controller.isCancelling(opId)) break
+            val tasks = try {
+                runner.getTasks(session, course)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e.isSessionExpiredError()) throw e
+                onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
+                continue
+            }
+            onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 共 ${tasks.size} 个节点", session.platform))
+
+            // Console normalModeAction completes the node video loop before runAutoAnswer.
+            for (task in tasks) {
+                if (controller.isCancelling(opId)) break
+                if (plan.haiqikejiVideoModel == 0 || !task.hasHaiqikejiCapability("video") ||
+                    task.isFinished() || task.id in plan.completedTaskIds
+                ) continue
+                try {
+                    val result = platformRunner?.takeIf { it.supports(session, task) }?.runTask(
+                        session,
+                        task,
+                        PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = plan.haiqikejiVideoModel),
+                        { controller.isCancelling(opId) },
+                        onEvent,
+                    ) ?: runTaskWithChallenge(
+                        session,
+                        task,
+                        if (plan.dryRun) mapOf("dryRun" to true) else emptyMap(),
+                        onEvent,
+                    )
+                    if (result.isSubmittedOrDone()) submitted.add(task.id)
+                    onEvent(SyncEvent("info", "${course.name}／${task.name} 视频：${result.status}", session.platform))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    if (e.isSessionExpiredError()) throw e
+                    onEvent(SyncEvent("error", "${course.name}／${task.name} 视频失败：${e.message}", session.platform))
+                }
+            }
+
+            if (!controller.isCancelling(opId) && plan.answerPolicy.enabled) {
+                val seenQuizIds = mutableSetOf<String>()
+                for (task in tasks) {
+                    if (controller.isCancelling(opId)) break
+                    val result = runHaiqikejiNodeAnswers(session, task, plan, opId, seenQuizIds, onEvent)
+                    if (result?.isSubmittedOrDone() == true) submitted.add(task.id)
+                }
+            }
+        }
+        return submitted
+    }
+
+    /**
+     * Haiqikeji 暴力模式: fetch each course concurrently, then run video nodes concurrently with a
+     * small mobile-safe cap. Any node failure is reported after the other active nodes finish.
+     */
+    private suspend fun runHaiqikejiMode2Courses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val platform = requireNotNull(platformRunner)
+        val submitted = Collections.synchronizedList(mutableListOf<String>())
+        val failures = Collections.synchronizedList(mutableListOf<Throwable>())
+        val courseTasks = coroutineScope {
+            courses.map { course -> async { course to runner.getTasks(session, course) } }.awaitAll()
+        }
+        val videos = courseTasks.flatMap { (course, tasks) ->
+            tasks.filter {
+                it.hasHaiqikejiCapability("video") && !it.isFinished() && it.id !in plan.completedTaskIds
+            }.map { course to it }
+        }
+        val completed = AtomicInteger()
+        val concurrency = Semaphore(8)
+        controller.updateProgress(opId, completed = 0, total = videos.size, detail = "暴力模式共 ${videos.size} 个视频任务")
+
+        coroutineScope {
+            videos.map { (course, task) ->
+                async {
+                    concurrency.withPermit {
+                        if (controller.isCancelling(opId)) return@withPermit
+                        try {
+                            val result = platform.runTask(
+                                session,
+                                task,
+                                PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = 2),
+                                { controller.isCancelling(opId) },
+                                onEvent,
+                            )
+                            if (result.isSubmittedOrDone()) submitted.add(task.id)
+                            onEvent(SyncEvent("info", "${course.name}／${task.name}：${result.status}", session.platform))
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            if (e.isSessionExpiredError()) throw e
+                            failures.add(e)
+                            onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
+                        } finally {
+                            val done = completed.incrementAndGet()
+                            controller.updateProgress(opId, completed = done, total = videos.size, detail = task.name.ifBlank { task.id })
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+
+        if (!controller.isCancelling(opId) && plan.answerPolicy.enabled) {
+            for ((course, tasks) in courseTasks) {
+                val seenQuizIds = mutableSetOf<String>()
+                for (task in tasks) {
+                    if (controller.isCancelling(opId)) break
+                    try {
+                        val result = runHaiqikejiNodeAnswers(
+                            session,
+                            task,
+                            plan,
+                            opId,
+                            seenQuizIds,
+                            onEvent,
+                            failures,
+                        )
+                        if (result?.isSubmittedOrDone() == true) submitted.add(task.id)
+                        if (result != null) {
+                            onEvent(SyncEvent("info", "${course.name}／${task.name}：${result.status}", session.platform))
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        if (e.isSessionExpiredError()) throw e
+                        failures.add(e)
+                        onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
+                    }
+                }
+            }
+        }
+
+        if (failures.isNotEmpty()) {
+            throw IllegalStateException("海旗科技暴力模式有 ${failures.size} 个任务失败", failures.first())
+        }
+        return submitted.toList()
     }
 
     /**
@@ -711,8 +898,12 @@ class CourseSyncManager(
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
         if (session.platform == "haiqikeji" && plan.answerPolicy.enabled) {
-            if (task.type.equals("work", true)) return runHaiqikejiWorkOrExam(session, task, "work", plan, opId, onEvent)
-            if (task.type.equals("exam", true)) return runHaiqikejiWorkOrExam(session, task, "exam", plan, opId, onEvent)
+            if (task.type.equals("work", true)) {
+                return runHaiqikejiWorkOrExam(session, task, "work", plan, opId, mutableSetOf(), onEvent)
+            }
+            if (task.type.equals("exam", true)) {
+                return runHaiqikejiWorkOrExam(session, task, "exam", plan, opId, mutableSetOf(), onEvent)
+            }
         }
         if (session.platform == "xuexitong" && plan.answerPolicy.enabled) {
             if (task.type.equals("quiz", true)) return runXuexitongChapterTest(session, task, plan, opId, onEvent)
@@ -957,12 +1148,41 @@ class CourseSyncManager(
             "answers" to answers,
         )
 
+    private suspend fun runHaiqikejiNodeAnswers(
+        session: SessionData,
+        nodeTask: TaskItem,
+        plan: RunPlan,
+        opId: String,
+        seenQuizIds: MutableSet<String>,
+        onEvent: (SyncEvent) -> Unit,
+        failures: MutableList<Throwable>? = null,
+    ): RunTaskResult? {
+        if (!plan.answerPolicy.enabled) return null
+        var last: RunTaskResult? = null
+        suspend fun runCapability(scope: String) {
+            try {
+                last = runHaiqikejiWorkOrExam(session, nodeTask, scope, plan, opId, seenQuizIds, onEvent)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e.isSessionExpiredError()) throw e
+                failures?.add(e)
+                val label = if (scope == "work") "作业" else "考试"
+                onEvent(SyncEvent("error", "${nodeTask.name.ifBlank { nodeTask.id }} ${label}答题失败：${e.message}", session.platform))
+            }
+        }
+        if (plan.answerPolicy.runWork && nodeTask.hasHaiqikejiCapability("work")) runCapability("work")
+        if (plan.answerPolicy.runExam && nodeTask.hasHaiqikejiCapability("exam")) runCapability("exam")
+        return last
+    }
+
     private suspend fun runHaiqikejiWorkOrExam(
         session: SessionData,
         nodeTask: TaskItem,
         scope: String,
         plan: RunPlan,
         opId: String,
+        seenQuizIds: MutableSet<String>,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
         if (scope == "work" && !plan.answerPolicy.runWork) {
@@ -982,7 +1202,12 @@ class CourseSyncManager(
         var last = list
         for ((itemIndex, item) in items.withIndex()) {
             if (controller.isCancelling(opId)) return last
-            val quizId = jsonString(item, idKey).ifBlank { "$scope-$itemIndex" }
+            val listedQuizId = jsonString(item, idKey)
+            val quizId = listedQuizId.ifBlank { "$scope-$itemIndex" }
+            if (listedQuizId.isNotBlank() && !seenQuizIds.add("$scope:$listedQuizId")) {
+                onEvent(SyncEvent("info", "${nodeTask.name.ifBlank { nodeTask.id }} 跳过重复${if (scope == "work") "作业" else "考试"} $listedQuizId", session.platform))
+                continue
+            }
             val quizTask = TaskItem(
                 id = quizId,
                 name = jsonString(item, "title").ifBlank { jsonString(item, "name") },

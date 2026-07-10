@@ -53,6 +53,35 @@ class CourseSyncManagerTest {
         }
     }
 
+    private class ConcurrentHaiqikejiPlatformRunner(
+        private val failTaskId: String? = null,
+    ) : PlatformTaskRunner {
+        val videoModels = mutableListOf<Int>()
+        var active = 0
+        var maxActive = 0
+
+        override fun supports(session: SessionData, task: TaskItem): Boolean = session.platform == "haiqikeji"
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            videoModels.add(options.videoModel)
+            active += 1
+            maxActive = maxOf(maxActive, active)
+            return try {
+                delay(1)
+                if (task.id == failTaskId) error("failed ${task.id}")
+                RunTaskResult(session.platform, task.id, "submitted")
+            } finally {
+                active -= 1
+            }
+        }
+    }
+
     private class ConcurrentYinghuaPlatformRunner : PlatformTaskRunner {
         val videoModels = mutableListOf<Int>()
         var active = 0
@@ -588,6 +617,65 @@ class CourseSyncManagerTest {
         assertEquals(listOf("video1"), submitted)
         assertEquals(listOf("video1"), platformRunner.submitted)
         assertTrue(runner.submitted.isEmpty())
+    }
+
+    @Test
+    fun `haiqikeji violence mode runs video tasks concurrently`() = runTest {
+        val hqSession = SessionData("haiqikeji", "stu")
+        val runner = FakeRunner(
+            courses = listOf(
+                CourseItem("c1", name = "course 1", platform = "haiqikeji"),
+                CourseItem("c2", name = "course 2", platform = "haiqikeji"),
+            ),
+            tasksByCourse = mapOf(
+                "c1" to listOf(
+                    TaskItem("v1", type = "video", platform = "haiqikeji"),
+                    TaskItem("v2", type = "video", platform = "haiqikeji"),
+                ),
+                "c2" to listOf(TaskItem("v3", type = "video", platform = "haiqikeji")),
+            ),
+        )
+        val platformRunner = ConcurrentHaiqikejiPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            hqSession,
+            RunPlan("hq-violence", "haiqikeji", "stu", haiqikejiVideoModel = 2),
+        )
+
+        assertEquals(setOf("v1", "v2", "v3"), submitted.toSet())
+        assertTrue(platformRunner.maxActive > 1)
+        assertEquals(listOf(2, 2, 2), platformRunner.videoModels.sorted())
+    }
+
+    @Test
+    fun `haiqikeji violence mode fails the batch when a video fails`() = runTest {
+        val hqSession = SessionData("haiqikeji", "stu")
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("c1", name = "course", platform = "haiqikeji")),
+            tasksByCourse = mapOf(
+                "c1" to listOf(
+                    TaskItem("ok", type = "video", platform = "haiqikeji"),
+                    TaskItem("broken", type = "video", platform = "haiqikeji"),
+                ),
+            ),
+        )
+        val controller = OperationController(now = { 0L })
+        val mgr = CourseSyncManager(
+            runner,
+            controller,
+            ConcurrentHaiqikejiPlatformRunner(failTaskId = "broken"),
+        )
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(
+                hqSession,
+                RunPlan("hq-violence-failure", "haiqikeji", "stu", haiqikejiVideoModel = 2),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("任务失败"))
+        assertEquals(OperationStatus.FAILED, controller.operations.value.single().status)
     }
 
     @Test
@@ -1173,6 +1261,139 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `haiqikeji fill and short answers stay as text in save mode`() = runTest {
+        val cases = listOf(
+            Triple(4, "fill", "北京"),
+            Triple(5, "short", "因为地球自转"),
+        )
+        for ((type, typeCode, answer) in cases) {
+            val runner = HaiqikejiAnswerRunner(
+                scope = "exam",
+                questionType = type,
+                questionContent = "Text question",
+                questionOptions = emptyList(),
+                questionOptionIdx = emptyList(),
+            )
+            val external = FakeAnswerProvider(listOf(answer))
+            val mgr = CourseSyncManager(
+                runner,
+                OperationController(now = { 0L }),
+                answerProviderFactory = AnswerProviderFactory { external },
+            )
+
+            val submitted = mgr.run(
+                SessionData("haiqikeji", "stu"),
+                haiqikejiAnswerPlan(scope = "exam", submitFinal = false, realSubmitExam = false),
+            )
+
+            assertTrue(submitted.isEmpty())
+            assertEquals(typeCode, external.requests.single().question.get("type").asString)
+            assertEquals(typeCode, external.requests.single().question.get("typeCode").asString)
+            val payload = runner.submittedAnswers.single()
+            assertEquals(type, payload["type"])
+            assertEquals(emptyList<String>(), payload["options"])
+            assertEquals(listOf(answer), payload["answers"])
+            assertEquals(listOf(false), runner.realSubmitOptions)
+        }
+    }
+
+    @Test
+    fun `haiqikeji mixed nodes finish all videos before exam answering`() = runTest {
+        val runner = HaiqikejiCapabilityRunner(
+            listOf(
+                TaskItem(
+                    "mixed",
+                    name = "mixed",
+                    type = "video",
+                    platform = "haiqikeji",
+                    raw = obj("courseId" to "course-1", "tabVideo" to 1, "tabExam" to 1),
+                ),
+                TaskItem(
+                    "video",
+                    name = "video",
+                    type = "video",
+                    platform = "haiqikeji",
+                    raw = obj("courseId" to "course-1", "tabVideo" to 1),
+                ),
+            ),
+        )
+        val external = FakeAnswerProvider(listOf("Option A"))
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            platformRunner = runner,
+            answerProviderFactory = AnswerProviderFactory { external },
+        )
+
+        mgr.run(
+            SessionData("haiqikeji", "stu"),
+            haiqikejiAnswerPlan(scope = "exam", submitFinal = true, realSubmitExam = true),
+        )
+
+        assertEquals(listOf("video:mixed", "video:video", "pullExam", "examQuestions", "exam"), runner.actions)
+    }
+
+    @Test
+    fun `haiqikeji mode2 mixed nodes answer only after all videos finish`() = runTest {
+        val runner = HaiqikejiCapabilityRunner(
+            listOf(
+                TaskItem(
+                    "mixed",
+                    type = "video",
+                    platform = "haiqikeji",
+                    raw = obj("courseId" to "course-1", "tabVideo" to 1, "tabExam" to 1),
+                ),
+                TaskItem(
+                    "video",
+                    type = "video",
+                    platform = "haiqikeji",
+                    raw = obj("courseId" to "course-1", "tabVideo" to 1),
+                ),
+            ),
+        )
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            platformRunner = runner,
+            answerProviderFactory = AnswerProviderFactory { FakeAnswerProvider(listOf("Option A")) },
+        )
+        val plan = haiqikejiAnswerPlan(scope = "exam", submitFinal = true, realSubmitExam = true)
+            .copy(haiqikejiVideoModel = 2)
+
+        mgr.run(SessionData("haiqikeji", "stu"), plan)
+
+        val pullExamIndex = runner.actions.indexOf("pullExam")
+        assertTrue(pullExamIndex > runner.actions.indexOf("video:mixed"))
+        assertTrue(pullExamIndex > runner.actions.indexOf("video:video"))
+        assertEquals(1, runner.actions.count { it == "exam" })
+    }
+
+    @Test
+    fun `haiqikeji answers the same exam only once per course`() = runTest {
+        val runner = HaiqikejiCapabilityRunner(
+            listOf(
+                TaskItem("exam-node-1", type = "exam", platform = "haiqikeji", raw = obj("courseId" to "course-1", "tabExam" to 1)),
+                TaskItem("exam-node-2", type = "exam", platform = "haiqikeji", raw = obj("courseId" to "course-1", "tabExam" to 1)),
+            ),
+        )
+        val mgr = CourseSyncManager(
+            runner,
+            OperationController(now = { 0L }),
+            platformRunner = runner,
+            answerProviderFactory = AnswerProviderFactory { FakeAnswerProvider(listOf("Option A")) },
+        )
+
+        mgr.run(
+            SessionData("haiqikeji", "stu"),
+            haiqikejiAnswerPlan(scope = "exam", submitFinal = true, realSubmitExam = true),
+        )
+
+        assertEquals(2, runner.actions.count { it == "pullExam" })
+        assertEquals(1, runner.actions.count { it == "examQuestions" })
+        assertEquals(1, runner.actions.count { it == "exam" })
+    }
+
+    @Test
     fun `autoExam xuexitong built in mode still calls xxtAI action`() = runTest {
         val runner = XuexitongFlowRunner()
         val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
@@ -1482,7 +1703,13 @@ class CourseSyncManagerTest {
         )
     }
 
-    private class HaiqikejiAnswerRunner(private val scope: String) : CourseTaskRunner {
+    private class HaiqikejiAnswerRunner(
+        private val scope: String,
+        private val questionType: Int = 1,
+        private val questionContent: String = "Pick one",
+        private val questionOptions: List<String> = listOf("Option A", "Option B"),
+        private val questionOptionIdx: List<String> = listOf("A", "B"),
+    ) : CourseTaskRunner {
         val actions = mutableListOf<String>()
         val submittedAnswers = mutableListOf<Map<String, Any>>()
         val realSubmitOptions = mutableListOf<Boolean>()
@@ -1520,7 +1747,7 @@ class CourseSyncManagerTest {
                     val answers = options["answers"] as List<Map<String, Any>>
                     submittedAnswers.addAll(answers)
                     if (action == "exam") realSubmitOptions.add(options["realSubmit"] == true)
-                    RunTaskResult("haiqikeji", task.id, if (action == "exam" && options["realSubmit"] != true) "dry_run" else "submitted")
+                    RunTaskResult("haiqikeji", task.id, if (action == "exam" && options["realSubmit"] != true) "saved" else "submitted")
                 }
                 else -> RunTaskResult("haiqikeji", task.id, "ok")
             }
@@ -1540,14 +1767,83 @@ class CourseSyncManagerTest {
                 "recordId" to "record-1",
                 "wrId" to "wr-1",
                 "waId" to "wa-1",
-                "type" to 1,
-                "content" to "Pick one",
-                "options" to arr("Option A", "Option B"),
-                "optionIdx" to arr("A", "B"),
+                "type" to questionType,
+                "content" to questionContent,
+                "options" to JsonArray().apply { questionOptions.forEach(::add) },
+                "optionIdx" to JsonArray().apply { questionOptionIdx.forEach(::add) },
             )
 
         private fun ctx(vararg extra: Pair<String, Any>): JsonObject =
             obj("courseId" to "course-1", *extra)
+    }
+
+    private class HaiqikejiCapabilityRunner(
+        private val tasks: List<TaskItem>,
+    ) : CourseTaskRunner, PlatformTaskRunner {
+        val actions = mutableListOf<String>()
+        private val course = CourseItem("course-1", name = "Course", platform = "haiqikeji", raw = obj("courseId" to "course-1"))
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(course)
+
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> = tasks
+
+        override fun supports(session: SessionData, task: TaskItem): Boolean =
+            task.type.equals("video", true) ||
+                runCatching { task.raw.get("tabVideo")?.asInt ?: 0 }.getOrDefault(0) > 0
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            actions.add("video:${task.id}")
+            return RunTaskResult("haiqikeji", task.id, "submitted")
+        }
+
+        override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>): RunTaskResult {
+            val action = options["action"] as? String ?: "none"
+            actions.add(action)
+            return when (action) {
+                "pullExam" -> RunTaskResult(
+                    "haiqikeji",
+                    task.id,
+                    "done",
+                    raw = obj(
+                        "exams" to arr(
+                            obj(
+                                "examId" to "shared-exam",
+                                "title" to "Exam",
+                                "courseId" to "course-1",
+                                "nodeId" to task.id,
+                            ),
+                        ),
+                    ),
+                )
+                "examQuestions" -> RunTaskResult(
+                    "haiqikeji",
+                    task.id,
+                    "questions",
+                    raw = obj(
+                        "questions" to arr(
+                            obj(
+                                "topicId" to "topic-1",
+                                "recordId" to "record-1",
+                                "wrId" to "wr-1",
+                                "waId" to "wa-1",
+                                "type" to 1,
+                                "content" to "Pick one",
+                                "options" to arr("Option A", "Option B"),
+                                "optionIdx" to arr("A", "B"),
+                            ),
+                        ),
+                    ),
+                )
+                "exam" -> RunTaskResult("haiqikeji", task.id, "submitted")
+                else -> RunTaskResult("haiqikeji", task.id, "ok")
+            }
+        }
     }
 
     private class FakeAnswerProvider(private val answers: List<String>) : AnswerProvider {

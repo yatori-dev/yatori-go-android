@@ -24,6 +24,12 @@ func TestParseQuizList_Exam(t *testing.T) {
 	}
 }
 
+func TestParseQuizList_RejectsServerError(t *testing.T) {
+	if _, err := ParseQuizList(`{"code":500,"msg":"系统异常"}`, "exam"); err == nil {
+		t.Fatal("non-200 quiz list must error")
+	}
+}
+
 func TestParseDetailRecords(t *testing.T) {
 	raw := `{"code":200,"data":{"workDetail":[{"id":501,"paperId":6196,"classId":1016378},{"id":502,"paperId":0,"classId":0}]}}`
 	got, err := ParseDetailRecords(raw)
@@ -39,6 +45,12 @@ func TestParseDetailRecords(t *testing.T) {
 	// paperId=0 / classId=0 should be left empty (not "0")
 	if got[1].PaperID != "" || got[1].ClassID != "" {
 		t.Fatalf("rec1 should have empty paperId/classId: %+v", got[1])
+	}
+}
+
+func TestParseDetailRecords_RejectsServerError(t *testing.T) {
+	if _, err := ParseDetailRecords(`{"code":401,"msg":"令牌不匹配"}`); err == nil {
+		t.Fatal("non-200 detail response must error")
 	}
 }
 
@@ -78,28 +90,31 @@ func TestParseStartQuestions_ConsultResult(t *testing.T) {
 	}
 }
 
-// questions without options (fill/short) are skipped, mirroring the console.
-func TestParseStartQuestions_SkipNoOptions(t *testing.T) {
-	raw := `{"code":200,"data":{"workTopics":[{"id":1,"type":4,"topic":"填空题","option":[]}]}}`
+func TestParseStartQuestions_PreservesFillWithoutOptions(t *testing.T) {
+	raw := `{"code":200,"data":{"workTopics":[{"id":1,"type":4,"topic":"请填写首都","option":[]}]}}`
 	got, err := ParseStartQuestions(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("fill question (no options) should be skipped, got %d", len(got))
+	if len(got) != 1 || got[0].TopicID != "1" || got[0].Type != HqkjTypeFill || got[0].Content != "请填写首都" {
+		t.Fatalf("fill question must be preserved: %+v", got)
 	}
 }
 
-// ParseStartQuestions is intentionally lenient: a non-200 / no-topics body yields
-// an empty slice (not an error) so the platform layer can try the consult fallback,
-// mirroring the console's len()==0 handling. Only malformed JSON errors.
-func TestParseStartQuestions_LenientOnNoTopics(t *testing.T) {
-	got, err := ParseStartQuestions(`{"code":500,"msg":"系统异常"}`)
+func TestParseStartQuestions_PreservesShortWithoutOptions(t *testing.T) {
+	raw := `{"code":200,"data":{"examTopics":[{"id":2,"type":5,"topic":"请简述原因"}]}}`
+	got, err := ParseStartQuestions(raw)
 	if err != nil {
-		t.Fatalf("non-200 with no topics should be lenient, got err: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("want 0 topics, got %d", len(got))
+	if len(got) != 1 || got[0].TopicID != "2" || got[0].Type != HqkjTypeShort || got[0].Content != "请简述原因" {
+		t.Fatalf("short question must be preserved: %+v", got)
+	}
+}
+
+func TestParseStartQuestions_RejectsServerError(t *testing.T) {
+	if _, err := ParseStartQuestions(`{"code":500,"msg":"系统异常"}`); err == nil {
+		t.Fatal("non-200 start response must error")
 	}
 	if _, err := ParseStartQuestions(`not-json`); err == nil {
 		t.Fatal("malformed JSON must error")
@@ -120,6 +135,13 @@ func TestFormatHqkjAnswer_Single(t *testing.T) {
 	got := FormatHqkjAnswer(HqkjTypeSingle, []string{"北京", "上海", "广州"}, []string{"A", "B", "C"}, []string{"上海"})
 	if len(got) != 1 || got[0] != "B" {
 		t.Fatalf("single: got %v, want [B]", got)
+	}
+}
+
+func TestFormatHqkjAnswer_PreservesServerOptionIdx(t *testing.T) {
+	got := FormatHqkjAnswer(HqkjTypeSingle, []string{"北京", "上海", "广州"}, []string{"A", "B", "C"}, []string{"B"})
+	if len(got) != 1 || got[0] != "B" {
+		t.Fatalf("server option idx must pass through unchanged: got %v, want [B]", got)
 	}
 }
 
