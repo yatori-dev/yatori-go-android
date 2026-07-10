@@ -362,8 +362,11 @@ internal fun yinghuaVideoModelFromSavedConfig(container: AppContainer, platform:
         it.str("account").equals(account, ignoreCase = false) &&
             it.str("accountType").equals(platform, ignoreCase = true)
     } ?: return 1
-    return user.obj("coursesCustom").int("videoModel", 1).takeIf { it in 1..3 } ?: 1
+    return yinghuaVideoModelFromCoursesCustom(user.obj("coursesCustom"))
 }
+
+internal fun yinghuaVideoModelFromCoursesCustom(cc: JsonObject): Int =
+    cc.int("videoModel", 1).takeIf { it in 0..3 } ?: 1
 
 internal fun welearnVideoModelFromSavedConfig(container: AppContainer, platform: String, account: String): Int {
     if (platform != "welearn") return 1

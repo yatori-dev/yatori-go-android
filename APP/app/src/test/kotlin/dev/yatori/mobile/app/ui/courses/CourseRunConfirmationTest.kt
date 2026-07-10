@@ -69,4 +69,27 @@ class CourseRunConfirmationTest {
         kotlin.test.assertFalse(confirmation.message.contains("学习通：章测"))
         kotlin.test.assertFalse(confirmation.message.contains("答题提交："))
     }
+    @Test
+    fun `yinghua final submit confirmation warns that exams will be submitted`() {
+        val cfg = MobileConfig(
+            users = listOf(
+                JsonObject().apply {
+                    addProperty("accountType", "yinghua")
+                    addProperty("account", "stu")
+                    add("coursesCustom", JsonObject().apply {
+                        addProperty("videoModel", 0)
+                        addProperty("autoExam", 1)
+                        addProperty("examAutoSubmit", 1)
+                    })
+                },
+            ),
+        )
+
+        val confirmation = buildCourseRunConfirmation("yinghua", "stu", cfg, dryRun = false)
+
+        assertContains(confirmation.message, "视频模式：不学习")
+        assertContains(confirmation.message, "答题提交：交卷")
+        assertContains(confirmation.message, "会交卷")
+    }
+
 }

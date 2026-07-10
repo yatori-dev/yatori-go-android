@@ -102,6 +102,18 @@ func (c *YingHuaClient) GetExamTopic(nodeID, examID string) (string, error) {
 	return string(b), err
 }
 
+// WorkFinalDetail fetches the completed work page used by the console to read the highest score.
+func (c *YingHuaClient) WorkFinalDetail(nodeID, workID string) (string, error) {
+	b, err := c.get(c.PreURL + "/api/work.json?nodeId=" + nodeID + "&workId=" + workID + "&token=" + c.Token)
+	return string(b), err
+}
+
+// ExamFinalDetail fetches the completed exam page used by the console to read the final score.
+func (c *YingHuaClient) ExamFinalDetail(nodeID, examID string) (string, error) {
+	b, err := c.get(c.PreURL + "/api/exam.json?nodeId=" + nodeID + "&examId=" + examID + "&token=" + c.Token)
+	return string(b), err
+}
+
 // SubmitWork submits one work answer (POST /api/work/submit.json).
 // qType is a standardized QType* string; wireAnswers are letters (choice) or text
 // (fill/short) as produced by FormatWireAnswer. finish="1" finalizes the work.
@@ -258,6 +270,20 @@ func ParseAnswerSubmit(raw string) (string, error) {
 		return r.Msg, fmt.Errorf("yinghua: answer submit failed: %s", r.Msg)
 	}
 	return r.Msg, nil
+}
+
+// ParseFinalScore reads the same score labels used by go-core after a final submit.
+func ParseFinalScore(raw string, isExam bool) (string, error) {
+	label := "最高分"
+	if isExam {
+		label = "最终得分"
+	}
+	pattern := regexp.MustCompile(regexp.QuoteMeta(label) + `：[^\d]*([\d]+(?:\.[\d]+)?)[^分]*分`)
+	match := pattern.FindStringSubmatch(strings.ReplaceAll(raw, "&nbsp;", ""))
+	if len(match) < 2 {
+		return "", fmt.Errorf("yinghua: %s not found", label)
+	}
+	return match[1], nil
 }
 
 // TurnExamTopic converts the exam/work questions HTML into a Topic slice.

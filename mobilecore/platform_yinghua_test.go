@@ -712,3 +712,68 @@ func TestRunTaskYinghua_ExamRealSubmit(t *testing.T) {
 		t.Fatalf("status=%q realSubmit=%v", res.Status, res.Raw["realSubmit"])
 	}
 }
+func TestRunTaskYinghua_WorkSaveOnly(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	var finishes []string
+	orig := yhSubmitWorkProvider
+	yhSubmitWorkProvider = func(_ *yhmobile.YingHuaClient, _, _, _ string, _ []string, finish string) (string, error) {
+		finishes = append(finishes, finish)
+		return `{"_code":0,"status":true,"msg":"答题保存成功"}`, nil
+	}
+	defer func() { yhSubmitWorkProvider = orig }()
+
+	taskJSON := `{"platform":"yinghua","id":"W7","options":{"action":"work","finalize":false,"answers":[{"answerId":"a1","type":"单选题","options":["甲","乙"],"answers":["乙"]}]}}`
+	e := parseEnvelope(t, RunTask(yhSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("work save-only should succeed: %s", e.Error)
+	}
+	if len(finishes) != 1 || finishes[0] != "0" {
+		t.Fatalf("finish sequence=%v, want [0]", finishes)
+	}
+}
+
+func TestRunTaskYinghua_ExamSaveOnly(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	var finishes []string
+	orig := yhSubmitExamProvider
+	yhSubmitExamProvider = func(_ *yhmobile.YingHuaClient, _, _, _ string, _ []string, finish string) (string, error) {
+		finishes = append(finishes, finish)
+		return `{"_code":0,"status":true,"msg":"答题保存成功"}`, nil
+	}
+	defer func() { yhSubmitExamProvider = orig }()
+
+	taskJSON := `{"platform":"yinghua","id":"E9","options":{"action":"exam","realSubmit":true,"finalize":false,"answers":[{"answerId":"a1","type":"单选题","options":["甲","乙"],"answers":["乙"]}]}}`
+	e := parseEnvelope(t, RunTask(yhSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("exam save-only should succeed: %s", e.Error)
+	}
+	if len(finishes) != 1 || finishes[0] != "0" {
+		t.Fatalf("finish sequence=%v, want [0]", finishes)
+	}
+}
+func TestRunTaskYinghua_ExamFinalScore(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	orig := yhExamFinalDetailProvider
+	yhExamFinalDetailProvider = func(_ *yhmobile.YingHuaClient, nodeID, examID string) (string, error) {
+		if nodeID != "201" || examID != "E9" {
+			t.Fatalf("nodeID=%q examID=%q", nodeID, examID)
+		}
+		return "<div>最终得分： 92 分</div>", nil
+	}
+	defer func() { yhExamFinalDetailProvider = orig }()
+
+	taskJSON := `{"platform":"yinghua","id":"E9","raw":{"examId":"E9","nodeId":"201"},"options":{"action":"examScore"}}`
+	e := parseEnvelope(t, RunTask(yhSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("exam score should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Raw["score"] != "92" {
+		t.Fatalf("score=%v, want 92", res.Raw["score"])
+	}
+}

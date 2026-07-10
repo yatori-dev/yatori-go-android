@@ -101,4 +101,11 @@ class CourseSyncWorkerConfigTest {
 
         assertFalse(policy.enabled)
     }
+    @Test
+    fun `yinghua video mode zero remains answer only`() {
+        val mode = yinghuaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) })
+
+        assertEquals(0, mode)
+    }
+
 }

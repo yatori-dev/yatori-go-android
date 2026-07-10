@@ -99,6 +99,14 @@ var yhSubmitExamProvider = func(c *yhmobile.YingHuaClient, examID, answerID, qTy
 	return c.SubmitExam(examID, answerID, qType, answers, finish)
 }
 
+var yhWorkFinalDetailProvider = func(c *yhmobile.YingHuaClient, nodeID, workID string) (string, error) {
+	return c.WorkFinalDetail(nodeID, workID)
+}
+
+var yhExamFinalDetailProvider = func(c *yhmobile.YingHuaClient, nodeID, examID string) (string, error) {
+	return c.ExamFinalDetail(nodeID, examID)
+}
+
 // --- StartLogin / ContinueLogin ---
 
 func startLoginYinghua(input AccountInput) (StartLoginResult, error) {
@@ -476,6 +484,10 @@ func runTaskYinghua(sess SessionData, input TaskInput) (RunTaskResult, error) {
 		return yhRunWork(sess, input)
 	case "exam":
 		return yhRunExam(sess, input)
+	case "workScore":
+		return yhFinalScore(sess, input, false)
+	case "examScore":
+		return yhFinalScore(sess, input, true)
 	}
 	nodeID := input.ID
 	if nodeID == "" {
@@ -825,6 +837,39 @@ func yhPullQuestions(sess SessionData, input TaskInput, isExam bool) (RunTaskRes
 		Platform: "yinghua", TaskID: idVal, Status: "questions",
 		Message: fmt.Sprintf("questions=%d", len(questions)),
 		Raw:     map[string]interface{}{"questions": questions},
+	}, nil
+}
+
+func yhFinalScore(sess SessionData, input TaskInput, isExam bool) (RunTaskResult, error) {
+	nodeID := strOf(input.Raw["nodeId"])
+	idKey := "workId"
+	if isExam {
+		idKey = "examId"
+	}
+	idVal := input.ID
+	if idVal == "" {
+		idVal = strOf(input.Raw[idKey])
+	}
+	if nodeID == "" || idVal == "" {
+		return RunTaskResult{}, fmt.Errorf("yinghua: final score requires raw.nodeId and task id (or raw.%s)", idKey)
+	}
+	var raw string
+	var err error
+	if isExam {
+		raw, err = yhExamFinalDetailProvider(yhClientPre(sess, input), nodeID, idVal)
+	} else {
+		raw, err = yhWorkFinalDetailProvider(yhClientPre(sess, input), nodeID, idVal)
+	}
+	if err != nil {
+		return RunTaskResult{}, fmt.Errorf("yinghua: final score detail failed: %w", err)
+	}
+	score, err := yhmobile.ParseFinalScore(raw, isExam)
+	if err != nil {
+		return RunTaskResult{}, err
+	}
+	return RunTaskResult{
+		Platform: "yinghua", TaskID: idVal, Status: "done",
+		Message: "score=" + score, Raw: map[string]interface{}{"score": score},
 	}, nil
 }
 

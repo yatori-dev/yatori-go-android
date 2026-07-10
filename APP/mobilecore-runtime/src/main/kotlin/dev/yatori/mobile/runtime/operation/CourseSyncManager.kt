@@ -130,28 +130,21 @@ class CourseSyncManager(
                 return submitted
             }
 
-            // Yinghua mode 2 (暴力): run video tasks concurrently per course, then auto-去红 pass.
-            if (session.platform == "yinghua" && plan.yinghuaVideoModel == 2) {
+            // A Yinghua node can independently contain video, work, and exam tabs. Keep every
+            // Yinghua mode on a dedicated path so a node's primary type/video completion cannot
+            // hide its other capabilities. This mirrors console nodeListStudy, which invokes
+            // videoAction, workAction, and examAction separately for every node.
+            if (session.platform == "yinghua" && (platformRunner != null || plan.answerPolicy.enabled)) {
                 submitted.addAll(withYinghuaKeepAlive(session, opId) {
-                    runYinghuaMode2Courses(session, plan, opId, courses, emit)
+                    when (plan.yinghuaVideoModel) {
+                        2 -> runYinghuaMode2Courses(session, plan, opId, courses, emit)
+                        3 -> runYinghuaRedCourses(session, plan, opId, courses, emit)
+                        else -> runYinghuaSequentialCourses(session, plan, opId, courses, emit)
+                    }
                 })
                 controller.markDone(
                     opId,
                     detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
-                )
-                return submitted
-            }
-
-            // Yinghua mode 3 must include nodes whose learning progress is already 100 but whose
-            // record is still marked red. The generic pending-task filter intentionally excludes
-            // completed tasks, so red removal needs its own refetch-until-clear path.
-            if (session.platform == "yinghua" && plan.yinghuaVideoModel == 3) {
-                submitted.addAll(withYinghuaKeepAlive(session, opId) {
-                    runYinghuaRedCourses(session, plan, opId, courses, emit)
-                })
-                controller.markDone(
-                    opId,
-                    detail = if (controller.isCancelling(opId)) "已取消，已去红 ${submitted.size} 个" else "去红完成，已提交 ${submitted.size} 个",
                 )
                 return submitted
             }
@@ -315,6 +308,57 @@ class CourseSyncManager(
         return submitted.toList()
     }
 
+    /** Normal/answer-only Yinghua flow: process every node capability independently. */
+    private suspend fun runYinghuaSequentialCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val submitted = ArrayList<String>()
+        for (course in courses) {
+            if (controller.isCancelling(opId)) break
+            val tasks = try {
+                runner.getTasks(session, course)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
+                continue
+            }
+            onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 共 ${tasks.size} 个节点", session.platform))
+            for (task in tasks) {
+                if (controller.isCancelling(opId)) break
+                val hasVideo = task.hasYinghuaCapability("video")
+                if (plan.yinghuaVideoModel != 0 && hasVideo && !task.isFinished() && task.id !in plan.completedTaskIds) {
+                    try {
+                        val result = platformRunner?.runTask(
+                            session,
+                            task,
+                            PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = plan.yinghuaVideoModel),
+                            { controller.isCancelling(opId) },
+                            onEvent,
+                        ) ?: runTaskWithChallenge(
+                            session,
+                            task,
+                            if (plan.dryRun) mapOf("dryRun" to true) else emptyMap(),
+                            onEvent,
+                        )
+                        if (result.isSubmittedOrDone()) submitted.add(task.id)
+                        onEvent(SyncEvent("info", "${course.name}／${task.name} 视频：${result.status}", session.platform))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        onEvent(SyncEvent("error", "${course.name}／${task.name} 视频失败：${e.message}", session.platform))
+                    }
+                }
+                runYinghuaNodeAnswers(session, task, plan, opId, onEvent)
+            }
+        }
+        return submitted
+    }
+
     /**
      * Yinghua 暴力模式 (videoModel=2): Phase 1 — run video tasks concurrently within each course
      * (mirrors console fastModeAction goroutines). Phase 2 — re-fetch tasks and run a 去红 pass
@@ -346,7 +390,7 @@ class CourseSyncManager(
                     }
                     onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 暴力模式 ${videoTasks.size} 个视频任务", session.platform))
                     coroutineScope {
-                        videoTasks.map { task ->
+                        val videoJobs = videoTasks.map { task ->
                             async {
                                 if (controller.isCancelling(opId)) return@async
                                 runCatching {
@@ -362,7 +406,14 @@ class CourseSyncManager(
                                     onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
                                 }
                             }
-                        }.awaitAll()
+                        }
+                        // The console starts each video goroutine and immediately handles that
+                        // course's work/exam tabs, rather than waiting for long videos to finish.
+                        for (task in tasks) {
+                            if (controller.isCancelling(opId)) break
+                            runYinghuaNodeAnswers(session, task, plan, opId, onEvent)
+                        }
+                        videoJobs.awaitAll()
                     }
                 }
             }.awaitAll()
@@ -370,7 +421,7 @@ class CourseSyncManager(
 
         // Phase 2: use the same refetch-until-clear implementation as standalone mode 3.
         if (!controller.isCancelling(opId)) {
-            for (taskId in runYinghuaRedCourses(session, plan, opId, courses, onEvent)) {
+            for (taskId in runYinghuaRedCourses(session, plan, opId, courses, onEvent, answerNodes = false)) {
                 if (!submitted.contains(taskId)) submitted.add(taskId)
             }
         }
@@ -390,6 +441,7 @@ class CourseSyncManager(
         opId: String,
         courses: List<CourseItem>,
         onEvent: (SyncEvent) -> Unit,
+        answerNodes: Boolean = true,
     ): List<String> {
         val platform = platformRunner ?: return emptyList()
         val submitted = Collections.synchronizedList(mutableListOf<String>())
@@ -399,6 +451,7 @@ class CourseSyncManager(
             courses.map { course ->
                 async {
                     var completedPasses = 0
+                    var answersHandled = false
                     while (!controller.isCancelling(opId)) {
                         val refreshed = try {
                             runner.getTasks(session, course)
@@ -407,6 +460,15 @@ class CourseSyncManager(
                         } catch (e: Throwable) {
                             onEvent(SyncEvent("warn", "${course.name.ifBlank { course.id }} 去红重新拉取失败：${e.message}", session.platform))
                             break
+                        }
+                        if (answerNodes && !answersHandled) {
+                            // 去红 mode still answers work/exam tabs; do it once rather than on
+                            // every refetch pass used to verify that the red marker cleared.
+                            for (task in refreshed) {
+                                if (controller.isCancelling(opId)) break
+                                runYinghuaNodeAnswers(session, task, plan, opId, onEvent)
+                            }
+                            answersHandled = true
                         }
                         val redTasks = refreshed.filter { task ->
                             val hasVideo = task.type.equals("video", true) ||
@@ -630,6 +692,211 @@ class CourseSyncManager(
         if (plan.answerPolicy.runWork) runXuexitongWorkOrExam(session, course, "work", plan, opId, onEvent)
         if (plan.answerPolicy.runExam) runXuexitongWorkOrExam(session, course, "exam", plan, opId, onEvent)
     }
+
+    private fun TaskItem.hasYinghuaCapability(capability: String): Boolean {
+        if (type.equals(capability, ignoreCase = true)) return true
+        val rawKey = when (capability.lowercase()) {
+            "video" -> "tabVideo"
+            "work" -> "tabWork"
+            "exam" -> "tabExam"
+            else -> return false
+        }
+        return runCatching { raw.get(rawKey)?.asBoolean == true }.getOrDefault(false)
+    }
+
+    /** Answer every enabled work/exam capability without letting one failed tab hide the other. */
+    private suspend fun runYinghuaNodeAnswers(
+        session: SessionData,
+        nodeTask: TaskItem,
+        plan: RunPlan,
+        opId: String,
+        onEvent: (SyncEvent) -> Unit,
+    ): RunTaskResult? {
+        if (!plan.answerPolicy.enabled) return null
+        var last: RunTaskResult? = null
+        suspend fun runCapability(scope: String) {
+            try {
+                last = runYinghuaWorkOrExam(session, nodeTask, scope, plan, opId, onEvent)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                val label = if (scope == "work") "作业" else "考试"
+                onEvent(SyncEvent("error", "${nodeTask.name.ifBlank { nodeTask.id }} ${label}答题失败：${e.message}", session.platform))
+            }
+        }
+        if (plan.answerPolicy.runWork && nodeTask.hasYinghuaCapability("work")) runCapability("work")
+        if (plan.answerPolicy.runExam && nodeTask.hasYinghuaCapability("exam")) runCapability("exam")
+        return last
+    }
+
+    /**
+     * Mirrors console workAction/examAction: list every paper on the node, start it, pull and
+     * answer every question, save each answer, and only send finish=1 when configured.
+     */
+    private suspend fun runYinghuaWorkOrExam(
+        session: SessionData,
+        nodeTask: TaskItem,
+        scope: String,
+        plan: RunPlan,
+        opId: String,
+        onEvent: (SyncEvent) -> Unit,
+    ): RunTaskResult {
+        val isWork = scope == "work"
+        val listAction = if (isWork) "pullWork" else "pullExam"
+        val questionAction = if (isWork) "workQuestions" else "examQuestions"
+        val listKey = if (isWork) "works" else "exams"
+        val idKey = if (isWork) "workId" else "examId"
+        val kind = if (isWork) "作业" else "考试"
+
+        val list = runTaskWithChallenge(session, nodeTask, mapOf("action" to listAction), onEvent)
+        val items = jsonObjects(list.raw.get(listKey))
+        onEvent(SyncEvent("info", "${nodeTask.name.ifBlank { nodeTask.id }} 共 ${items.size} 项${kind}", session.platform))
+        var last = list
+        for ((itemIndex, item) in items.withIndex()) {
+            if (controller.isCancelling(opId)) return last
+            val quizId = jsonString(item, idKey).ifBlank { "${scope}-${itemIndex}" }
+            val quizRaw = item.deepCopy().apply {
+                if (!has("preUrl") && nodeTask.raw.has("preUrl")) add("preUrl", nodeTask.raw.get("preUrl"))
+            }
+            val quizTask = TaskItem(
+                id = quizId,
+                name = jsonString(item, "title").ifBlank { "${kind}${itemIndex + 1}" },
+                type = scope,
+                platform = "yinghua",
+                raw = quizRaw,
+            )
+            val pulled = runTaskWithChallenge(session, quizTask, mapOf("action" to questionAction), onEvent)
+            val questions = jsonObjects(pulled.raw.get("questions"))
+            if (questions.isEmpty()) {
+                onEvent(SyncEvent("warn", "${quizTask.name.ifBlank { quizTask.id }} 未解析到题目，跳过提交", session.platform))
+                last = pulled
+                continue
+            }
+
+            val answerPayloads = ArrayList<Map<String, Any>>()
+            val historyQuestions = ArrayList<Triple<Int, JsonObject, AnswerDecision>>()
+            var hasBlankAnswer = false
+            for ((qIndex, rawQuestion) in questions.withIndex()) {
+                if (controller.isCancelling(opId)) return pulled
+                val q = normalizeYinghuaQuestion(rawQuestion)
+                val label = "yinghua ${scope} ${qIndex + 1}"
+                recordQuestionHistory(
+                    opId = opId,
+                    session = session,
+                    scope = "yinghua-${scope}",
+                    taskId = quizTask.id,
+                    label = label,
+                    q = q,
+                    index = qIndex + 1,
+                    total = questions.size,
+                    status = QuestionHistoryStatus.PENDING,
+                )
+                val decision = answersWithFallback(session, pulled.raw, q, plan, opId, label, onEvent)
+                if (decision.answers.isEmpty()) {
+                    val message = "yinghua ${scope} question ${qIndex + 1} missing answer"
+                    recordQuestionHistory(
+                        opId = opId,
+                        session = session,
+                        scope = "yinghua-${scope}",
+                        taskId = quizTask.id,
+                        label = label,
+                        q = q,
+                        index = qIndex + 1,
+                        total = questions.size,
+                        answerSource = decision.source,
+                        status = QuestionHistoryStatus.MISSING,
+                        message = message,
+                    )
+                    if (plan.answerPolicy.pauseOnMissingAnswer) error(message)
+                    onEvent(SyncEvent("warn", message, session.platform))
+                    continue
+                }
+                if (decision.answers.any { it.isBlank() }) hasBlankAnswer = true
+                historyQuestions.add(Triple(qIndex, q, decision))
+                recordQuestionHistory(
+                    opId = opId,
+                    session = session,
+                    scope = "yinghua-${scope}",
+                    taskId = quizTask.id,
+                    label = label,
+                    q = q,
+                    index = qIndex + 1,
+                    total = questions.size,
+                    answers = decision.answers,
+                    answerSource = decision.source,
+                    status = QuestionHistoryStatus.ANSWERED,
+                )
+                answerPayloads.add(yinghuaAnswerPayload(rawQuestion, decision.answers))
+            }
+            if (answerPayloads.isEmpty()) continue
+
+            val finalSubmit = if (isWork) {
+                plan.answerPolicy.submitWorkFinal || (plan.answerPolicy.submitFinalWhenComplete && !hasBlankAnswer)
+            } else {
+                plan.answerPolicy.submitExamFinal || (plan.answerPolicy.submitFinalWhenComplete && !hasBlankAnswer)
+            }
+            val options = mutableMapOf<String, Any>(
+                "action" to scope,
+                "answers" to answerPayloads,
+                "finalize" to finalSubmit,
+            )
+            // realSubmit guards any exam HTTP submit in Go. Saving answers with finish=0 is still
+            // required when auto-final-submit is off, exactly as the original console behaves.
+            if (!isWork) options["realSubmit"] = true
+            if (plan.dryRun) options["dryRun"] = true
+            last = runTaskWithChallenge(session, quizTask, options, onEvent)
+            if (finalSubmit && !plan.dryRun) {
+                val scoreAction = if (isWork) "workScore" else "examScore"
+                try {
+                    val scoreResult = runTaskWithChallenge(session, quizTask, mapOf("action" to scoreAction), onEvent)
+                    val score = jsonString(scoreResult.raw, "score")
+                    if (score.isNotBlank()) {
+                        onEvent(SyncEvent("info", "${quizTask.name.ifBlank { quizTask.id }} ${kind}得分：${score}", session.platform))
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    // The paper was already finalized; score retrieval failure must not turn a
+                    // successful submission into a retry that could submit it again.
+                    onEvent(SyncEvent("warn", "${quizTask.name.ifBlank { quizTask.id }} 已交卷，但获取得分失败：${e.message}", session.platform))
+                }
+            }
+            for ((originalIndex, q, decision) in historyQuestions) {
+                recordQuestionHistory(
+                    opId = opId,
+                    session = session,
+                    scope = "yinghua-${scope}",
+                    taskId = quizTask.id,
+                    label = "yinghua ${scope} ${originalIndex + 1}",
+                    q = q,
+                    index = originalIndex + 1,
+                    total = questions.size,
+                    answers = decision.answers,
+                    answerSource = decision.source,
+                    status = if (finalSubmit) QuestionHistoryStatus.SUBMITTED else QuestionHistoryStatus.SAVED,
+                    finalSubmit = finalSubmit,
+                    realSubmit = !plan.dryRun,
+                    message = last.status,
+                )
+            }
+        }
+        return last
+    }
+
+    private fun normalizeYinghuaQuestion(raw: JsonObject): JsonObject =
+        raw.deepCopy().apply {
+            val type = jsonString(raw, "type")
+            if (!has("typeCode")) addProperty("typeCode", type)
+            if (!has("qid")) addProperty("qid", jsonString(raw, "answerId").ifBlank { jsonString(raw, "index") })
+        }
+
+    private fun yinghuaAnswerPayload(raw: JsonObject, answers: List<String>): Map<String, Any> =
+        mapOf(
+            "answerId" to jsonString(raw, "answerId"),
+            "type" to jsonString(raw, "type"),
+            "options" to jsonStrings(raw.get("options")),
+            "answers" to answers,
+        )
 
     private suspend fun runHaiqikejiWorkOrExam(
         session: SessionData,

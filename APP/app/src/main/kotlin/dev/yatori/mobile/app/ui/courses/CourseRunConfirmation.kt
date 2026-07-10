@@ -29,7 +29,7 @@ internal fun buildCourseRunConfirmation(
     val submitMode = matrix.submitModes.firstOrNull { it.value == cc.int("examAutoSubmit") }?.label ?: "只保存"
     val includes = cc.arrayText("includeCourses").ifBlank { "全部课程" }
     val excludes = cc.arrayText("excludeCourses").ifBlank { "无" }
-    val highRiskSubmit = !dryRun && platform == "xuexitong" && cc.int("autoExam") != 0 && cc.int("examAutoSubmit") != 0
+    val highRiskSubmit = !dryRun && matrix.submitModes.isNotEmpty() && answerModeValue != 0 && cc.int("examAutoSubmit") != 0
 
     val message = buildString {
         append(if (dryRun) "本次运行不会自动提交答案和进度。\n\n" else "本次运行会自动提交答案和进度。\n\n")

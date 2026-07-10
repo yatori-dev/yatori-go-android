@@ -292,3 +292,16 @@ func TestTurnExamTopic(t *testing.T) {
 		t.Fatalf("options=%v", tp.Options)
 	}
 }
+func TestParseFinalScore(t *testing.T) {
+	work, err := mobile.ParseFinalScore("<div>最高分：&nbsp;98.5 分</div>", false)
+	if err != nil || work != "98.5" {
+		t.Fatalf("work score=%q err=%v", work, err)
+	}
+	exam, err := mobile.ParseFinalScore("<div>最终得分： 87 分</div>", true)
+	if err != nil || exam != "87" {
+		t.Fatalf("exam score=%q err=%v", exam, err)
+	}
+	if _, err := mobile.ParseFinalScore("<html>暂无成绩</html>", true); err == nil {
+		t.Fatal("missing exam score should fail")
+	}
+}
