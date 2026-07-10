@@ -74,6 +74,111 @@ class CourseSyncManagerTest {
             return RunTaskResult(session.platform, task.id, "submitted")
         }
     }
+    private class YinghuaRedRunner(private val redTask: TaskItem) : CourseTaskRunner {
+        private val redCourse = CourseItem("red-course", name = "red course", platform = "yinghua")
+        var getTasksCalls = 0
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(redCourse)
+
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+            getTasksCalls += 1
+            return if (getTasksCalls == 1) listOf(redTask) else emptyList()
+        }
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: Map<String, Any>,
+        ): RunTaskResult = error("generic runner must not handle Yinghua red mode")
+    }
+
+    private class YinghuaPersistentRedRunner(private val redTask: TaskItem) : CourseTaskRunner {
+        private val course = CourseItem("persistent-red-course", name = "persistent red course", platform = "yinghua")
+        var getTasksCalls = 0
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(course)
+
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+            getTasksCalls += 1
+            return listOf(redTask)
+        }
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: Map<String, Any>,
+        ): RunTaskResult = error("generic runner must not handle persistent Yinghua red mode")
+    }
+
+    private class YinghuaMode2AutoRedRunner : CourseTaskRunner {
+        private val course = CourseItem("auto-red-course", name = "auto red course", platform = "yinghua")
+        private val video = TaskItem("auto-red-video", name = "auto red video", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("tabVideo", true)
+            addProperty("viewedDuration", 5)
+        })
+        private val redVideo = video.copy(status = "completed", progress = 100.0, raw = video.raw.deepCopy().apply {
+            addProperty("errorMessage", "检测到可能使用并行播放刷课")
+        })
+        var getTasksCalls = 0
+
+        override suspend fun getCourses(session: SessionData): List<CourseItem> = listOf(course)
+
+        override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+            getTasksCalls += 1
+            return when (getTasksCalls) {
+                1 -> listOf(video)
+                2 -> listOf(redVideo)
+                else -> emptyList()
+            }
+        }
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: Map<String, Any>,
+        ): RunTaskResult = error("generic runner must not handle Yinghua mode 2 / red mode")
+    }
+
+    private class SlowYinghuaRedPlatformRunner : PlatformTaskRunner {
+        var keepAliveCalls = 0
+
+        override fun supports(session: SessionData, task: TaskItem): Boolean = true
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            if (task.id == "keepAlive") {
+                keepAliveCalls += 1
+                return RunTaskResult(session.platform, task.id, "done")
+            }
+            delay(4 * 60_000L + 1L)
+            return RunTaskResult(session.platform, task.id, "submitted")
+        }
+    }
+
+    private class YinghuaRedPlatformRunner : PlatformTaskRunner {
+        val executed = mutableListOf<String>()
+        val videoModels = mutableListOf<Int>()
+
+        override fun supports(session: SessionData, task: TaskItem): Boolean = true
+
+        override suspend fun runTask(
+            session: SessionData,
+            task: TaskItem,
+            options: PlatformTaskRunOptions,
+            shouldCancel: () -> Boolean,
+            onEvent: (SyncEvent) -> Unit,
+        ): RunTaskResult {
+            executed.add(task.id)
+            videoModels.add(options.videoModel)
+            return RunTaskResult(session.platform, task.id, "submitted")
+        }
+    }
+
     private class ResultStatusRunner(
         private val platform: String,
         statuses: List<String>,
@@ -205,6 +310,97 @@ class CourseSyncManagerTest {
 
         assertEquals(setOf("result-0", "result-1"), submitted.toSet())
         assertEquals(runner.tasks.map { it.id }.toSet(), platformRunner.executed.toSet())
+    }
+
+    @Test
+    fun yinghuaRedModeKeepsSessionAliveDuringLongRun() = runTest {
+        val redTask = TaskItem("slow-red", name = "slow red", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("tabVideo", true)
+            addProperty("errorMessage", "检测到可能使用并行播放刷课")
+            addProperty("viewedDuration", 60)
+        })
+        val runner = YinghuaRedRunner(redTask)
+        val platformRunner = SlowYinghuaRedPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("yinghua-red-keepalive", "yinghua", "stu", yinghuaVideoModel = 3),
+        )
+
+        assertEquals(listOf("slow-red"), submitted)
+        assertEquals(1, platformRunner.keepAliveCalls)
+    }
+
+    @Test
+    fun yinghuaRedModeStopsAfterBoundedPassesWhenServerFlagNeverClears() = runTest {
+        val redTask = TaskItem("stale-red", name = "stale red", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("tabVideo", true)
+            addProperty("errorMessage", "检测到可能使用并行播放刷课")
+            addProperty("viewedDuration", 30)
+        })
+        val runner = YinghuaPersistentRedRunner(redTask)
+        val platformRunner = YinghuaRedPlatformRunner()
+        val events = mutableListOf<SyncEvent>()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("yinghua-stale-red", "yinghua", "stu", yinghuaVideoModel = 3),
+            onEvent = events::add,
+        )
+
+        assertEquals(listOf("stale-red"), submitted)
+        assertEquals(10, platformRunner.executed.size)
+        assertEquals(11, runner.getTasksCalls)
+        assertTrue(events.any { it.level == "warn" && it.message.contains("达到 10 轮") })
+    }
+
+    @Test
+    fun yinghuaViolenceModeAutoRedRefetchesUntilWarningClears() = runTest {
+        val runner = YinghuaMode2AutoRedRunner()
+        val platformRunner = YinghuaRedPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("yinghua-auto-red", "yinghua", "stu", yinghuaVideoModel = 2),
+        )
+
+        assertEquals(listOf("auto-red-video"), submitted)
+        assertEquals(listOf("auto-red-video", "auto-red-video"), platformRunner.executed)
+        assertEquals(listOf(2, 3), platformRunner.videoModels)
+        assertEquals(3, runner.getTasksCalls)
+    }
+
+    @Test
+    fun yinghuaRedModeProcessesCompletedRedNodeAndRefetchesUntilClear() = runTest {
+        val redTask = TaskItem(
+            id = "red-video",
+            name = "red video",
+            type = "video",
+            status = "completed",
+            progress = 100.0,
+            platform = "yinghua",
+            raw = JsonObject().apply {
+                addProperty("tabVideo", true)
+                addProperty("errorMessage", "检测到可能使用并行播放刷课")
+                addProperty("viewedDuration", 0)
+            },
+        )
+        val runner = YinghuaRedRunner(redTask)
+        val platformRunner = YinghuaRedPlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            SessionData("yinghua", "stu"),
+            RunPlan("yinghua-red", "yinghua", "stu", yinghuaVideoModel = 3),
+        )
+
+        assertEquals(listOf("red-video"), submitted)
+        assertEquals(listOf("red-video"), platformRunner.executed)
+        assertEquals(listOf(3), platformRunner.videoModels)
+        assertEquals(2, runner.getTasksCalls)
     }
 
     @Test

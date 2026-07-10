@@ -132,10 +132,26 @@ class CourseSyncManager(
 
             // Yinghua mode 2 (暴力): run video tasks concurrently per course, then auto-去红 pass.
             if (session.platform == "yinghua" && plan.yinghuaVideoModel == 2) {
-                submitted.addAll(runYinghuaMode2Courses(session, plan, opId, courses, emit))
+                submitted.addAll(withYinghuaKeepAlive(session, opId) {
+                    runYinghuaMode2Courses(session, plan, opId, courses, emit)
+                })
                 controller.markDone(
                     opId,
                     detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
+                )
+                return submitted
+            }
+
+            // Yinghua mode 3 must include nodes whose learning progress is already 100 but whose
+            // record is still marked red. The generic pending-task filter intentionally excludes
+            // completed tasks, so red removal needs its own refetch-until-clear path.
+            if (session.platform == "yinghua" && plan.yinghuaVideoModel == 3) {
+                submitted.addAll(withYinghuaKeepAlive(session, opId) {
+                    runYinghuaRedCourses(session, plan, opId, courses, emit)
+                })
+                controller.markDone(
+                    opId,
+                    detail = if (controller.isCancelling(opId)) "已取消，已去红 ${submitted.size} 个" else "去红完成，已提交 ${submitted.size} 个",
                 )
                 return submitted
             }
@@ -150,23 +166,7 @@ class CourseSyncManager(
             }
             controller.updateProgress(opId, completed = 0, total = pending.size, detail = "共 ${pending.size} 个任务")
 
-            // For yinghua, run a background keepAlive ticker (every 4 min) while tasks execute.
-            // Without this the server session expires after ~5 min and returns "账号登录超时".
-            coroutineScope {
-                val keepAliveJob = if (session.platform == "yinghua") launch {
-                    delay(4 * 60_000L)
-                    while (!controller.isCancelling(opId)) {
-                        runCatching {
-                            val kaTask = TaskItem(
-                                id = "keepAlive", type = "keepAlive", name = "keepAlive",
-                                platform = "yinghua", raw = session.extra.deepCopy(),
-                            )
-                            platformRunner?.runTask(session, kaTask, PlatformTaskRunOptions(), { false }, {})
-                        }
-                        delay(4 * 60_000L)
-                    }
-                } else null
-
+            withYinghuaKeepAlive(session, opId) {
                 for ((index, p) in pending.withIndex()) {
                     if (controller.isCancelling(opId)) {
                         emit(SyncEvent("warn", "已收到取消请求，停止运行", plan.platform))
@@ -183,8 +183,6 @@ class CourseSyncManager(
                         }
                     controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
                 }
-
-                keepAliveJob?.cancel()
             }
 
             if (!controller.isCancelling(opId) && session.platform == "xuexitong" && plan.answerPolicy.enabled) {
@@ -213,6 +211,38 @@ class CourseSyncManager(
             throw e
         }
         return submitted
+    }
+
+    /** Runs every Yinghua execution mode under the same four-minute keep-alive cadence. */
+    private suspend fun <T> withYinghuaKeepAlive(
+        session: SessionData,
+        opId: String,
+        block: suspend () -> T,
+    ): T {
+        if (session.platform != "yinghua") return block()
+        return coroutineScope {
+            val keepAliveJob = launch {
+                delay(4 * 60_000L)
+                while (!controller.isCancelling(opId)) {
+                    runCatching {
+                        val task = TaskItem(
+                            id = "keepAlive",
+                            type = "keepAlive",
+                            name = "keepAlive",
+                            platform = "yinghua",
+                            raw = session.extra.deepCopy(),
+                        )
+                        platformRunner?.runTask(session, task, PlatformTaskRunOptions(), { false }, {})
+                    }
+                    delay(4 * 60_000L)
+                }
+            }
+            try {
+                block()
+            } finally {
+                keepAliveJob.cancel()
+            }
+        }
     }
 
     private suspend fun xuexitongOrderedTasks(
@@ -338,33 +368,87 @@ class CourseSyncManager(
             }.awaitAll()
         }
 
-        // Phase 2: 去红 pass — re-fetch tasks to find newly-flagged nodes after concurrent play
+        // Phase 2: use the same refetch-until-clear implementation as standalone mode 3.
         if (!controller.isCancelling(opId)) {
-            for (course in courses) {
-                if (controller.isCancelling(opId)) break
-                val refreshed = runCatching { runner.getTasks(session, course) }.getOrElse { continue }
-                val redTasks = refreshed.filter {
-                    runCatching { it.raw.get("errorMessage")?.asString == "检测到可能使用并行播放刷课" }.getOrDefault(false)
-                }
-                if (redTasks.isNotEmpty()) {
-                    onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 去红 ${redTasks.size} 个节点", session.platform))
-                }
-                for (task in redTasks) {
-                    if (controller.isCancelling(opId)) break
-                    runCatching {
-                        platform.runTask(
-                            session, task,
-                            PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = 3),
-                            { controller.isCancelling(opId) },
-                            onEvent,
-                        )
-                    }.onFailure { e ->
-                        onEvent(SyncEvent("warn", "${course.name}／${task.name} 去红失败：${e.message}", session.platform))
-                    }
-                }
+            for (taskId in runYinghuaRedCourses(session, plan, opId, courses, onEvent)) {
+                if (!submitted.contains(taskId)) submitted.add(taskId)
             }
         }
 
+        return submitted.toList()
+    }
+
+    /**
+     * Yinghua 去红 mirrors console nodeListStudy(videoModel=3): courses may run concurrently, red
+     * nodes inside one course are submitted sequentially, and the course task list is fetched again
+     * until the parallel-play warning disappears. A bounded pass count prevents a permanently stale
+     * server flag from recursing forever; failures are retried on the next pass after 10 seconds.
+     */
+    private suspend fun runYinghuaRedCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val platform = platformRunner ?: return emptyList()
+        val submitted = Collections.synchronizedList(mutableListOf<String>())
+        val maxPasses = 10
+
+        coroutineScope {
+            courses.map { course ->
+                async {
+                    var completedPasses = 0
+                    while (!controller.isCancelling(opId)) {
+                        val refreshed = try {
+                            runner.getTasks(session, course)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            onEvent(SyncEvent("warn", "${course.name.ifBlank { course.id }} 去红重新拉取失败：${e.message}", session.platform))
+                            break
+                        }
+                        val redTasks = refreshed.filter { task ->
+                            val hasVideo = task.type.equals("video", true) ||
+                                runCatching { task.raw.get("tabVideo")?.asBoolean == true }.getOrDefault(false)
+                            val isRed = runCatching {
+                                task.raw.get("errorMessage")?.asString == "检测到可能使用并行播放刷课"
+                            }.getOrDefault(false)
+                            hasVideo && isRed
+                        }
+                        if (redTasks.isEmpty()) break
+                        if (completedPasses >= maxPasses) {
+                            onEvent(SyncEvent("warn", "${course.name.ifBlank { course.id }} 去红达到 $maxPasses 轮仍有 ${redTasks.size} 个标红节点，停止重试", session.platform))
+                            break
+                        }
+
+                        completedPasses += 1
+                        onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 去红第 $completedPasses 轮，共 ${redTasks.size} 个节点", session.platform))
+                        for (task in redTasks) {
+                            if (controller.isCancelling(opId)) break
+                            try {
+                                val result = platform.runTask(
+                                    session,
+                                    task,
+                                    PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = 3),
+                                    { controller.isCancelling(opId) },
+                                    onEvent,
+                                )
+                                if (result.isSubmittedOrDone() && !submitted.contains(task.id)) submitted.add(task.id)
+                                onEvent(SyncEvent("info", "${course.name}／${task.name} 去红：${result.status}", session.platform))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                onEvent(SyncEvent("warn", "${course.name}／${task.name} 去红失败：${e.message}", session.platform))
+                                sleepMillis(10_000L)
+                            }
+                        }
+                        // Dry-run never clears the server flag, so one observed pass is sufficient.
+                        if (plan.dryRun) break
+                    }
+                }
+            }.awaitAll()
+        }
         return submitted.toList()
     }
 

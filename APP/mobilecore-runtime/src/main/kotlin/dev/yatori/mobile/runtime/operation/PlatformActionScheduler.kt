@@ -318,6 +318,23 @@ class PlatformActionScheduler(
         return result
     }
 
+    /**
+     * Mirrors console videoBadRedAction exactly: submit the recorded viewedDuration once with
+     * studyId="0". Do not call the video-state endpoint first, because that allocates a new study
+     * session and changes the request used by the original red-removal flow.
+     */
+    suspend fun submitYinghuaRedProgress(
+        session: SessionData,
+        task: TaskItem,
+        input: YinghuaTickInput,
+    ): RunTaskResult {
+        require(session.platform == "yinghua") { "yinghua red progress requires a yinghua session" }
+        val redTask = task.copy(raw = task.raw.deepCopy().apply { addProperty("studyId", "0") })
+        val result = repository.runTask(session, redTask, mapOf("studyTime" to input.studyTime))
+        saveState(session, redTask, "yinghua-progress", result, progress = input.studyTime.toDouble(), intervalSeconds = 8)
+        return result
+    }
+
     suspend fun prepareXuexitongAudio(session: SessionData, task: TaskItem): StoredActionState {
         require(session.platform == "xuexitong") { "xuexitong audio requires a xuexitong session" }
         val result = repository.runTask(session, task, mapOf("action" to "audioPrepare"))

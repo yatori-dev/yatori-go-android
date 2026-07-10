@@ -227,6 +227,31 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `yinghua red mode submits original viewed duration with study id zero before delay`() = runTest {
+        val session = SessionData("yinghua", "stu")
+        val task = TaskItem("red-video", name = "red video", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("videoDuration", 120)
+            addProperty("viewedDuration", 0)
+            addProperty("errorMessage", "检测到可能使用并行播放刷课")
+        })
+        gateway.results.add(RunTaskResult("yinghua", "red-video", "submitted", raw = JsonObject().apply {
+            addProperty("studyId", "red-study")
+            addProperty("studyTime", 0)
+        }))
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 3))
+
+        assertEquals("submitted", result.status)
+        assertEquals(1, gateway.options.size)
+        assertEquals(null, gateway.options.single()["action"])
+        assertEquals(0, gateway.options.single()["studyTime"])
+        assertEquals("0", gateway.tasks.single().raw.get("studyId").asString)
+        assertEquals(listOf(0), gateway.sleepCountsAtCalls)
+        assertEquals(listOf(8_000L), gateway.sleeps)
+    }
+
+    @Test
     fun `yinghua video is not truncated by generic max tick limit`() = runTest {
         val session = SessionData("yinghua", "stu")
         val task = TaskItem("long-video", name = "long video", type = "video", platform = "yinghua", raw = JsonObject().apply {
@@ -301,7 +326,9 @@ class PlatformTaskSchedulerTest {
     private class FakeGateway : CoreGateway {
         val results = ArrayDeque<RunTaskResult>()
         val options = mutableListOf<Map<String, Any>>()
+        val tasks = mutableListOf<TaskItem>()
         val sleeps = mutableListOf<Long>()
+        val sleepCountsAtCalls = mutableListOf<Int>()
 
         override suspend fun init(baseDir: String) = InitResult(baseDir, "fake")
         override suspend fun healthCheck() = HealthInfo("fake", "go0", true, true)
@@ -319,6 +346,8 @@ class PlatformTaskSchedulerTest {
         override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> = emptyList()
         override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>): RunTaskResult {
             this.options.add(options)
+            tasks.add(task)
+            sleepCountsAtCalls.add(sleeps.size)
             return results.removeFirst()
         }
         override suspend fun getLogs(cursor: String) = LogResult("", "", false, emptyList())

@@ -308,19 +308,19 @@ class PlatformTaskScheduler(
             return actions.tickYinghuaKeepAlive(session, reloginOnExpired = true).result
         }
 
-        // 去红模式: only process nodes flagged with parallel-play warning; submit viewedDuration once.
-        // Mirrors console videoBadRedAction: no time increment, 8 s sleep, one submit, break.
+        // 去红模式: only process nodes flagged with parallel-play warning; submit the original
+        // viewedDuration once with studyId=0, then wait 8 s before the next node/refetch. This is
+        // the exact request order used by console videoBadRedAction.
         if (options.videoModel == 3) {
             val errorMsg = runCatching { task.raw.get("errorMessage")?.asString ?: "" }.getOrDefault("")
             if (errorMsg != "检测到可能使用并行播放刷课") {
                 return RunTaskResult(session.platform, task.id, "skipped", "no red flag")
             }
-            val started = actions.startYinghuaProgress(session, task)
-            val viewedDuration = durationSeconds(started.task.raw, "viewedDuration").coerceAtLeast(0)
-            sleepMillis(8_000L)
-            if (shouldCancel()) return RunTaskResult(session.platform, task.id, "started", raw = started.raw)
-            val result = actions.tickYinghuaProgress(session, task.id, YinghuaTickInput(studyTime = max(1, viewedDuration)))
+            if (shouldCancel()) return RunTaskResult(session.platform, task.id, "skipped", "cancelled before red submit")
+            val viewedDuration = durationSeconds(task.raw, "viewedDuration").coerceAtLeast(0)
+            val result = actions.submitYinghuaRedProgress(session, task, YinghuaTickInput(studyTime = viewedDuration))
             onEvent(tickEvent(session.platform, task, 1, 1, viewedDuration))
+            if (!shouldCancel()) sleepMillis(8_000L)
             return result
         }
 
