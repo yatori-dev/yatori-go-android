@@ -42,6 +42,8 @@ import dev.yatori.mobile.api.dto.MobileConfig
 import dev.yatori.mobile.app.di.AppContainer
 import dev.yatori.mobile.app.platform.IntChoice
 import dev.yatori.mobile.app.platform.platformCourseConfig
+import dev.yatori.mobile.app.service.autoReloginWithOcr
+import dev.yatori.mobile.app.service.loadCoursesWithSessionRecovery
 import dev.yatori.mobile.app.ui.common.SecondaryScaffold
 import dev.yatori.mobile.app.ui.common.TopBarAction
 import dev.yatori.mobile.app.ui.nav.Navigator
@@ -131,18 +133,27 @@ fun CourseRuleEditorScreen(container: AppContainer, nav: Navigator, platform: St
     }
 
     fun syncCourses() {
-        val session = repo.getSession(platform, account) ?: run {
-            Toast.makeText(context, "请先登录账号", Toast.LENGTH_SHORT).show()
-            return
-        }
+        val accountUrl = cfg.findUser(platform, account)?.str("url").orEmpty()
+        val session = repo.getSession(platform, account, accountUrl)
+            ?: repo.listSessions().firstOrNull { it.platform == platform && it.account == account }?.session
+            ?: run {
+                Toast.makeText(context, "请先登录账号", Toast.LENGTH_SHORT).show()
+                return
+            }
         syncing = true
         scope.launch {
-            runCatching { withContext(Dispatchers.IO) { repo.getCourses(session) } }
-                .onSuccess { courses ->
-                    cachedCourses = courses
-                    Toast.makeText(context, "已同步 ${courses.size} 门课程", Toast.LENGTH_SHORT).show()
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    loadCoursesWithSessionRecovery(
+                        initialSession = session,
+                        fetchCourses = repo::getCourses,
+                        relogin = { autoReloginWithOcr(container, platform, account, accountUrl) },
+                    )
                 }
-                .onFailure { Toast.makeText(context, "同步失败：${it.message}", Toast.LENGTH_SHORT).show() }
+            }.onSuccess { courses ->
+                cachedCourses = courses
+                Toast.makeText(context, "已同步 ${courses.size} 门课程", Toast.LENGTH_SHORT).show()
+            }.onFailure { Toast.makeText(context, "同步失败：${it.message}", Toast.LENGTH_SHORT).show() }
             syncing = false
         }
     }

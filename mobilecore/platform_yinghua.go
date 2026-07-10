@@ -275,8 +275,20 @@ func getTasksYinghua(sess SessionData, input CourseInput) (TaskListResult, error
 	if err != nil {
 		return TaskListResult{}, err
 	}
-	records := yhFetchVideoRecords(c, courseID)
-	pcRecords := yhFetchPCVideoRecords(c, courseID)
+	records, err := yhFetchVideoRecords(c, courseID)
+	if err != nil {
+		return TaskListResult{}, fmt.Errorf("yinghua: video records failed: %w", err)
+	}
+	pcRecords, err := yhFetchPCVideoRecords(c, courseID)
+	if err != nil {
+		// The PC record endpoint only enriches red/error state. Preserve the original
+		// console's best-effort behavior for ordinary endpoint failures, but never hide
+		// an explicit expired session from the Android re-login flow.
+		if yhmobile.IsYinghuaAuthExpiryMessage(err.Error()) {
+			return TaskListResult{}, fmt.Errorf("yinghua: pc video records failed: %w", err)
+		}
+		pcRecords = map[string]yhmobile.PCVideoRecordItem{}
+	}
 	tasks := make([]TaskItem, 0)
 	for _, ch := range chapters {
 		chaptID := strconv.FormatFloat(ch.ID, 'f', 0, 64)
@@ -369,18 +381,18 @@ func getTasksYinghua(sess SessionData, input CourseInput) (TaskListResult, error
 	return TaskListResult{Platform: "yinghua", ParentID: courseID, Tasks: tasks}, nil
 }
 
-func yhFetchVideoRecords(c *yhmobile.YingHuaClient, courseID string) map[string]yhmobile.VideoRecordItem {
+func yhFetchVideoRecords(c *yhmobile.YingHuaClient, courseID string) (map[string]yhmobile.VideoRecordItem, error) {
 	out := map[string]yhmobile.VideoRecordItem{}
 	seen := map[string]bool{}
 	lastPage := 1
 	for page := 1; page <= lastPage; page++ {
 		raw, err := yhVideoRecordProvider(c, courseID, page)
 		if err != nil {
-			break
+			return nil, err
 		}
 		parsed, err := yhmobile.ParseVideoRecordPage(raw)
 		if err != nil {
-			break
+			return nil, err
 		}
 		if parsed.PageCount > 0 {
 			lastPage = parsed.PageCount
@@ -404,21 +416,21 @@ func yhFetchVideoRecords(c *yhmobile.YingHuaClient, courseID string) map[string]
 			break
 		}
 	}
-	return out
+	return out, nil
 }
 
-func yhFetchPCVideoRecords(c *yhmobile.YingHuaClient, courseID string) map[string]yhmobile.PCVideoRecordItem {
+func yhFetchPCVideoRecords(c *yhmobile.YingHuaClient, courseID string) (map[string]yhmobile.PCVideoRecordItem, error) {
 	out := map[string]yhmobile.PCVideoRecordItem{}
 	seen := map[string]bool{}
 	lastPage := 1
 	for page := 1; page <= lastPage; page++ {
 		raw, err := yhPCVideoRecordProvider(c, courseID, page)
 		if err != nil {
-			break
+			return nil, err
 		}
 		parsed, err := yhmobile.ParsePCVideoRecordPage(raw)
 		if err != nil {
-			break
+			return nil, err
 		}
 		if parsed.PageCount > 0 {
 			lastPage = parsed.PageCount
@@ -442,7 +454,7 @@ func yhFetchPCVideoRecords(c *yhmobile.YingHuaClient, courseID string) map[strin
 			break
 		}
 	}
-	return out
+	return out, nil
 }
 
 func yhPercent(v float64) float64 {

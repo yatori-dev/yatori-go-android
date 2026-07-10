@@ -193,6 +193,22 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `yinghua keepalive surfaces expiry without starting captcha login`() = runTest {
+        store.saveCredential("yinghua", AccountInput("stu", "secret", "https://school"))
+        gateway.results.add(RunTaskResult("yinghua", "keepAlive", "done", raw = JsonObject().apply {
+            addProperty("alive", false)
+            addProperty("expired", true)
+        }))
+        val task = TaskItem("keepAlive", name = "keepAlive", type = "keepAlive", platform = "yinghua")
+
+        val result = taskScheduler.runTask(SessionData("yinghua", "stu"), task)
+
+        assertEquals(true, result.raw.get("expired").asBoolean)
+        assertEquals(0, gateway.loginCalls)
+        assertEquals("keepAlive", gateway.options.single()["action"])
+    }
+
+    @Test
     fun `yinghua video scheduler drives state and 5s ticks from viewed duration`() = runTest {
         val session = SessionData("yinghua", "stu")
         val task = TaskItem("video1", name = "video", type = "video", platform = "yinghua", raw = JsonObject().apply {
@@ -329,6 +345,7 @@ class PlatformTaskSchedulerTest {
         val tasks = mutableListOf<TaskItem>()
         val sleeps = mutableListOf<Long>()
         val sleepCountsAtCalls = mutableListOf<Int>()
+        var loginCalls = 0
 
         override suspend fun init(baseDir: String) = InitResult(baseDir, "fake")
         override suspend fun healthCheck() = HealthInfo("fake", "go0", true, true)
@@ -336,8 +353,10 @@ class PlatformTaskSchedulerTest {
         override suspend fun setConfig(config: MobileConfig) {}
         override suspend fun setXuexitongFontTables(glyfJson: String, cmapJson: String) {}
         override suspend fun getConfig() = MobileConfig()
-        override suspend fun startLogin(platform: Platform, account: AccountInput): LoginResult =
-            LoginResult.Done(SessionData(platform.id, account.account))
+        override suspend fun startLogin(platform: Platform, account: AccountInput): LoginResult {
+            loginCalls += 1
+            return LoginResult.Done(SessionData(platform.id, account.account))
+        }
         override suspend fun continueLogin(taskId: String, result: OcrResult): LoginResult =
             LoginResult.Done(SessionData("p", "a"))
         override suspend fun cancelLogin(taskId: String) {}

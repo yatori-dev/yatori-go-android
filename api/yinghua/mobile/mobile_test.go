@@ -175,6 +175,13 @@ func TestParsePCVideoRecordPage(t *testing.T) {
 	}
 }
 
+func TestParsePCVideoRecordPage_AuthenticationExpiry(t *testing.T) {
+	_, err := mobile.ParsePCVideoRecordPage(`{"_code":1,"status":false,"msg":"账号登录超时，请重新登录","result":{}}`)
+	if err == nil || err.Error() != "yinghua: pc video record failed: 账号登录超时，请重新登录" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseKeepAliveResult(t *testing.T) {
 	if alive, expired := mobile.ParseKeepAliveResult(`{"status":true,"_code":0}`); !alive || expired {
 		t.Fatalf("alive session: got alive=%v expired=%v, want true/false", alive, expired)

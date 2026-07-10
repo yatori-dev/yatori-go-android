@@ -220,13 +220,7 @@ private suspend fun tryRefreshSession(
     }.getOrNull()  // any network/parse error → fall back to existing session
 }
 
-private fun isSessionExpiredError(error: Throwable): Boolean {
-    val msg = (error.message ?: "").lowercase()
-    return "超时" in msg || "重新登录" in msg || "login" in msg || "expired" in msg ||
-        "session" in msg || "unauthorized" in msg || "登录" in msg
-}
-
-private suspend fun autoReloginWithOcr(
+internal suspend fun autoReloginWithOcr(
     container: dev.yatori.mobile.app.di.AppContainer,
     platform: String,
     account: String,
@@ -245,8 +239,9 @@ private suspend fun autoReloginWithOcr(
 
     if (outcome !is dev.yatori.mobile.app.ui.courses.LoginOutcome.Success) return null
 
-    // Return the freshly saved session (URL fallback mirrors doWork session lookup).
-    return container.repository.getSession(platform, account, url)
+    // Return the freshly saved URL-keyed session; saved credentials retain the institution URL.
+    val lookupUrl = url.ifBlank { credential.url }
+    return container.repository.getSession(platform, account, lookupUrl)
         ?: container.repository.listSessions()
             .firstOrNull { it.platform == platform && it.account == account }
             ?.session

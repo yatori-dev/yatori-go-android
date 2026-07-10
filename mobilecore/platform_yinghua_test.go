@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	yhmobile "github.com/yatori-dev/yatori-go-mobile-core/api/yinghua/mobile"
@@ -291,6 +292,55 @@ func TestGetTasksYinghua_Success(t *testing.T) {
 	}
 	if task.Raw["viewedDuration"] != float64(1200) {
 		t.Fatalf("viewedDuration=%v, want 1200", task.Raw["viewedDuration"])
+	}
+}
+
+func TestGetTasksYinghua_VideoRecordExpiryPropagates(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restore := fakeYhChapter(yhChapterRaw, nil)
+	defer restore()
+	restoreRecords := fakeYhVideoRecords(`{"_code":1,"status":false,"msg":"账号登录超时，请重新登录","result":{}}`, nil)
+	defer restoreRecords()
+
+	e := parseEnvelope(t, GetTasks(yhSessJSON, yhCourseJSON))
+	if e.OK {
+		t.Fatal("video-record authentication expiry should fail the task pull")
+	}
+	if !strings.Contains(e.Error, "账号登录超时，请重新登录") {
+		t.Fatalf("expiry message was lost: %s", e.Error)
+	}
+}
+
+func TestGetTasksYinghua_PCRecordExpiryPropagates(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restore := fakeYhChapter(yhChapterRaw, nil)
+	defer restore()
+	restoreRecords := fakeYhVideoRecords(yhVideoRecordRaw, nil)
+	defer restoreRecords()
+	restorePC := fakeYhPCVideoRecords(`{"_code":1,"status":false,"msg":"账号登录超时，请重新登录"}`, nil)
+	defer restorePC()
+
+	e := parseEnvelope(t, GetTasks(yhSessJSON, yhCourseJSON))
+	if e.OK || !strings.Contains(e.Error, "账号登录超时，请重新登录") {
+		t.Fatalf("pc-record expiry must propagate, ok=%v error=%s", e.OK, e.Error)
+	}
+}
+
+func TestGetTasksYinghua_OrdinaryPCRecordFailureIsBestEffort(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restore := fakeYhChapter(yhChapterRaw, nil)
+	defer restore()
+	restoreRecords := fakeYhVideoRecords(yhVideoRecordRaw, nil)
+	defer restoreRecords()
+	restorePC := fakeYhPCVideoRecords("", errors.New("pc endpoint unavailable"))
+	defer restorePC()
+
+	e := parseEnvelope(t, GetTasks(yhSessJSON, yhCourseJSON))
+	if !e.OK {
+		t.Fatalf("optional PC record failure must not block normal videos: %s", e.Error)
 	}
 }
 

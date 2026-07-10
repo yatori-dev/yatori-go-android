@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -154,78 +155,161 @@ type PCVideoRecordPage struct {
 	PageCount int
 }
 
+const yinghuaRetryInterval = 150 * time.Millisecond
+
+// Kept replaceable so retry behavior can be tested without real sleeps.
+var yinghuaRetrySleep = time.Sleep
+
+// retryYinghuaSafeRequest mirrors the original core's retry behavior for read/progress
+// endpoints that are safe to repeat. Authentication failures are returned immediately so
+// the Android host can perform the captcha-aware re-login flow instead of waiting through
+// transient retries. Exam/work submissions intentionally do not use this helper.
+func retryYinghuaSafeRequest(retries int, retryServerCode500 bool, request func() ([]byte, error)) ([]byte, error) {
+	var lastBody []byte
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		body, err := request()
+		lastBody, lastErr = body, err
+		if err == nil && !isYinghuaTransientResponse(body, retryServerCode500) {
+			return body, nil
+		}
+		if attempt < retries {
+			yinghuaRetrySleep(yinghuaRetryInterval)
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	summary := strings.TrimSpace(string(lastBody))
+	if len(summary) > 256 {
+		summary = summary[:256]
+	}
+	return nil, fmt.Errorf("yinghua: transient response after %d attempts: %s", retries+1, summary)
+}
+
+func isYinghuaTransientResponse(body []byte, retryServerCode500 bool) bool {
+	lower := strings.ToLower(string(body))
+	if strings.Contains(lower, "502 bad gateway") || strings.Contains(lower, "504 gateway time-out") || strings.Contains(lower, "504 gateway timeout") {
+		return true
+	}
+	if !retryServerCode500 {
+		return false
+	}
+	var resp struct {
+		Code   int    `json:"_code"`
+		Status bool   `json:"status"`
+		Msg    string `json:"msg"`
+	}
+	if json.Unmarshal(body, &resp) != nil || resp.Status || resp.Code != 500 {
+		return false
+	}
+	return !IsYinghuaAuthExpiryMessage(resp.Msg)
+}
+
+// IsYinghuaAuthExpiryMessage reports explicit server authentication-expiry messages.
+// Hosts use it to distinguish a stale session from an optional endpoint failure.
+func IsYinghuaAuthExpiryMessage(message string) bool {
+	lower := strings.ToLower(message)
+	markers := []string{
+		"账号登录超时", "登录已超时", "请重新登录", "会话已过期", "会话过期",
+		"登录状态已失效", "登录失效", "未登录", "session expired", "login expired",
+		"login timeout", "login required", "not logged in", "unauthorized", "invalid token",
+		"token expired", "token无效",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // CourseList fetches /api/course/list.json. Returns raw JSON string.
 func (c *YingHuaClient) CourseList() (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/course/list.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"type":     "0",
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(10, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/course/list.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"type":     "0",
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
 
 // CourseDetail fetches /api/course/detail.json for the given courseId.
 func (c *YingHuaClient) CourseDetail(courseID string) (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/course/detail.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"courseId": courseID,
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(30, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/course/detail.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"courseId": courseID,
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
 
 // CourseChapter fetches /api/course/chapter.json (chapter+node list) for a course.
 func (c *YingHuaClient) CourseChapter(courseID string) (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/course/chapter.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"courseId": courseID,
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(30, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/course/chapter.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"courseId": courseID,
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
 
 // CourseVideoRecords fetches /api/record/video.json for current study progress.
 func (c *YingHuaClient) CourseVideoRecords(courseID string, page int) (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/record/video.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"courseId": courseID,
-		"page":     strconv.Itoa(page),
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(20, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/record/video.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"courseId": courseID,
+			"page":     strconv.Itoa(page),
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
 
 // CourseVideoRecordsPC fetches the PC-side red/error state record list.
 func (c *YingHuaClient) CourseVideoRecordsPC(courseID string, page int) (string, error) {
-	b, err := c.get(c.PreURL + "/user/study_record/video.json?courseId=" + courseID + "&_=" + strconv.FormatInt(time.Now().Unix(), 10) + "&page=" + strconv.Itoa(page))
+	b, err := retryYinghuaSafeRequest(20, true, func() ([]byte, error) {
+		return c.get(c.PreURL + "/user/study_record/video.json?courseId=" + courseID + "&_=" + strconv.FormatInt(time.Now().Unix(), 10) + "&page=" + strconv.Itoa(page))
+	})
 	return string(b), err
 }
 
 // VideoStudyState fetches /api/node/video.json for current study state of a node.
 func (c *YingHuaClient) VideoStudyState(nodeID string) (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/node/video.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"nodeId":   nodeID,
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(20, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/node/video.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"nodeId":   nodeID,
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
 
 // SubmitStudyTime posts /api/node/study.json to record watched time.
 func (c *YingHuaClient) SubmitStudyTime(nodeID, studyID string, studyTime int) (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/node/study.json", map[string]string{
-		"platform":  "Android",
-		"version":   "1.4.8",
-		"nodeId":    nodeID,
-		"token":     c.Token,
-		"terminal":  "Android",
-		"studyTime": strconv.Itoa(studyTime),
-		"studyId":   studyID,
+	b, err := retryYinghuaSafeRequest(20, true, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/node/study.json", map[string]string{
+			"platform":  "Android",
+			"version":   "1.4.8",
+			"nodeId":    nodeID,
+			"token":     c.Token,
+			"terminal":  "Android",
+			"studyTime": strconv.Itoa(studyTime),
+			"studyId":   studyID,
+		})
 	})
 	return string(b), err
 }
@@ -233,10 +317,12 @@ func (c *YingHuaClient) SubmitStudyTime(nodeID, studyID string, studyTime int) (
 // KeepAlive posts /api/online.json to keep the login session warm.
 // The host drives this on a ~5-minute ticker; on expiry it must re-login.
 func (c *YingHuaClient) KeepAlive() (string, error) {
-	b, err := c.postForm(c.PreURL+"/api/online.json", map[string]string{
-		"platform": "Android",
-		"version":  "1.4.8",
-		"token":    c.Token,
+	b, err := retryYinghuaSafeRequest(8, false, func() ([]byte, error) {
+		return c.postForm(c.PreURL+"/api/online.json", map[string]string{
+			"platform": "Android",
+			"version":  "1.4.8",
+			"token":    c.Token,
+		})
 	})
 	return string(b), err
 }
@@ -316,6 +402,9 @@ func ParseVideoRecordPage(raw string) (VideoRecordPage, error) {
 // ParsePCVideoRecordPage parses /user/study_record/video.json.
 func ParsePCVideoRecordPage(raw string) (PCVideoRecordPage, error) {
 	var resp struct {
+		Status   *bool               `json:"status"`
+		Code     int                 `json:"_code"`
+		Msg      string              `json:"msg"`
 		List     []PCVideoRecordItem `json:"list"`
 		PageInfo struct {
 			Page      int `json:"page"`
@@ -324,6 +413,9 @@ func ParsePCVideoRecordPage(raw string) (PCVideoRecordPage, error) {
 	}
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		return PCVideoRecordPage{}, fmt.Errorf("yinghua: pc video record parse error: %w", err)
+	}
+	if resp.Status != nil && !*resp.Status {
+		return PCVideoRecordPage{}, fmt.Errorf("yinghua: pc video record failed: %s", resp.Msg)
 	}
 	return PCVideoRecordPage{
 		Items:     resp.List,

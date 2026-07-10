@@ -305,7 +305,9 @@ class PlatformTaskScheduler(
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
         if (task.id == "keepAlive" || task.type.equals("keepAlive", true)) {
-            return actions.tickYinghuaKeepAlive(session, reloginOnExpired = true).result
+            // Yinghua re-login requires captcha OCR, which the runtime module cannot complete.
+            // Surface expiry to CourseSyncManager/WorkManager instead of creating a dangling challenge.
+            return actions.tickYinghuaKeepAlive(session, reloginOnExpired = false).result
         }
 
         // 去红模式: only process nodes flagged with parallel-play warning; submit the original

@@ -11,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -139,7 +140,7 @@ class CourseSyncManagerTest {
         ): RunTaskResult = error("generic runner must not handle Yinghua mode 2 / red mode")
     }
 
-    private class SlowYinghuaRedPlatformRunner : PlatformTaskRunner {
+    private class SlowYinghuaRedPlatformRunner(private val expireKeepAlive: Boolean = false) : PlatformTaskRunner {
         var keepAliveCalls = 0
 
         override fun supports(session: SessionData, task: TaskItem): Boolean = true
@@ -153,7 +154,9 @@ class CourseSyncManagerTest {
         ): RunTaskResult {
             if (task.id == "keepAlive") {
                 keepAliveCalls += 1
-                return RunTaskResult(session.platform, task.id, "done")
+                return RunTaskResult(session.platform, task.id, "done", raw = JsonObject().apply {
+                    addProperty("expired", expireKeepAlive)
+                })
             }
             delay(4 * 60_000L + 1L)
             return RunTaskResult(session.platform, task.id, "submitted")
@@ -210,6 +213,81 @@ class CourseSyncManagerTest {
             executed.add(task.id)
             return RunTaskResult(session.platform, task.id, task.name)
         }
+    }
+
+    @Test
+    fun yinghuaSkipsCoursesThatHaveNotStarted() = runTest {
+        var getTasksCalls = 0
+        val futureCourse = CourseItem(
+            "future",
+            name = "未来课程",
+            platform = "yinghua",
+            raw = JsonObject().apply { addProperty("startDate", "2999-01-01") },
+        )
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) = listOf(futureCourse)
+            override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+                getTasksCalls += 1
+                return listOf(task("must-not-run"))
+            }
+            override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>) =
+                error("future course task must not run")
+        }
+        val events = mutableListOf<SyncEvent>()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), FakePlatformRunner())
+
+        val submitted = mgr.run(session, RunPlan("future-course", "yinghua", "stu"), events::add)
+
+        assertTrue(submitted.isEmpty())
+        assertEquals(0, getTasksCalls)
+        assertTrue(events.any { it.message.contains("未来课程 尚未开课，已跳过") })
+    }
+
+    @Test
+    fun yinghuaNodeFetchExpiryPropagatesToHostRelogin() = runTest {
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) = listOf(course("c1", "课程一"))
+            override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> =
+                throw IllegalStateException("outer", IllegalStateException("账号登录超时，请重新登录"))
+            override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>) =
+                error("must not run")
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), FakePlatformRunner())
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(session, RunPlan("fetch-expired", "yinghua", "stu"))
+        }
+
+        assertEquals("outer", error.message)
+    }
+
+    @Test
+    fun yinghuaVideoSubmitExpiryPropagatesToHostRelogin() = runTest {
+        val video = TaskItem(
+            "video-expired",
+            name = "视频",
+            type = "video",
+            platform = "yinghua",
+            raw = JsonObject().apply { addProperty("tabVideo", true) },
+        )
+        val runner = FakeRunner(listOf(course("c1", "课程一")), mapOf("c1" to listOf(video)))
+        val expiringPlatform = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = true
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult = throw IllegalStateException("yinghua: study submit failed: 账号登录超时，请重新登录")
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), expiringPlatform)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(session, RunPlan("submit-expired", "yinghua", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("账号登录超时"))
     }
 
     @Test
@@ -329,6 +407,28 @@ class CourseSyncManagerTest {
         )
 
         assertEquals(listOf("slow-red"), submitted)
+        assertEquals(1, platformRunner.keepAliveCalls)
+    }
+
+    @Test
+    fun yinghuaKeepAliveExpiryAbortsRunSoHostCanRelogin() = runTest {
+        val redTask = TaskItem("expired-red", name = "expired red", type = "video", platform = "yinghua", raw = JsonObject().apply {
+            addProperty("tabVideo", true)
+            addProperty("errorMessage", "检测到可能使用并行播放刷课")
+            addProperty("viewedDuration", 60)
+        })
+        val runner = YinghuaRedRunner(redTask)
+        val platformRunner = SlowYinghuaRedPlatformRunner(expireKeepAlive = true)
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(
+                SessionData("yinghua", "stu"),
+                RunPlan("yinghua-expired-keepalive", "yinghua", "stu", yinghuaVideoModel = 3),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("session expired"))
         assertEquals(1, platformRunner.keepAliveCalls)
     }
 

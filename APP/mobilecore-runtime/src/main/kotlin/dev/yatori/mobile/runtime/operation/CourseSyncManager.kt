@@ -118,7 +118,18 @@ class CourseSyncManager(
         )
         val submitted = ArrayList<String>()
         try {
-            val courses = runner.getCourses(session).filter { plan.rule.matches(it.id, it.name) }
+            val selectedCourses = runner.getCourses(session).filter { plan.rule.matches(it.id, it.name) }
+            val courses = if (session.platform == "yinghua") {
+                selectedCourses.filter { course ->
+                    val notStarted = course.isYinghuaCourseNotStarted()
+                    if (notStarted) {
+                        emit(SyncEvent("info", "${course.name.ifBlank { course.id }} 尚未开课，已跳过", plan.platform))
+                    }
+                    !notStarted
+                }
+            } else {
+                selectedCourses
+            }
             emit(SyncEvent("info", "共 ${courses.size} 门课程", plan.platform))
 
             if (session.platform == "xuexitong") {
@@ -217,7 +228,7 @@ class CourseSyncManager(
             val keepAliveJob = launch {
                 delay(4 * 60_000L)
                 while (!controller.isCancelling(opId)) {
-                    runCatching {
+                    val result = runCatching {
                         val task = TaskItem(
                             id = "keepAlive",
                             type = "keepAlive",
@@ -226,7 +237,9 @@ class CourseSyncManager(
                             raw = session.extra.deepCopy(),
                         )
                         platformRunner?.runTask(session, task, PlatformTaskRunOptions(), { false }, {})
-                    }
+                    }.getOrNull()
+                    val expired = runCatching { result?.raw?.get("expired")?.asBoolean == true }.getOrDefault(false)
+                    if (expired) error("yinghua: session expired; please re-login")
                     delay(4 * 60_000L)
                 }
             }
@@ -324,6 +337,7 @@ class CourseSyncManager(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
+                if (e.isYinghuaSessionExpiredError()) throw e
                 onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
                 continue
             }
@@ -350,6 +364,7 @@ class CourseSyncManager(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
+                        if (e.isYinghuaSessionExpiredError()) throw e
                         onEvent(SyncEvent("error", "${course.name}／${task.name} 视频失败：${e.message}", session.platform))
                     }
                 }
@@ -379,7 +394,15 @@ class CourseSyncManager(
             courses.map { course ->
                 async {
                     if (controller.isCancelling(opId)) return@async
-                    val tasks = runCatching { runner.getTasks(session, course) }.getOrElse { return@async }
+                    val tasks = try {
+                        runner.getTasks(session, course)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        if (e.isYinghuaSessionExpiredError()) throw e
+                        onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
+                        return@async
+                    }
                     val videoTasks = tasks.filter {
                         // A Yinghua chapter node may carry video together with work/exam tabs. The
                         // Go adapter keeps those capabilities in raw; type alone represents only one
@@ -393,7 +416,7 @@ class CourseSyncManager(
                         val videoJobs = videoTasks.map { task ->
                             async {
                                 if (controller.isCancelling(opId)) return@async
-                                runCatching {
+                                try {
                                     val r = platform.runTask(
                                         session, task,
                                         PlatformTaskRunOptions(dryRun = plan.dryRun, videoModel = 2),
@@ -402,7 +425,10 @@ class CourseSyncManager(
                                     )
                                     if (r.isSubmittedOrDone()) submitted.add(task.id)
                                     onEvent(SyncEvent("info", "${course.name}／${task.name}：${r.status}", session.platform))
-                                }.onFailure { e ->
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Throwable) {
+                                    if (e.isYinghuaSessionExpiredError()) throw e
                                     onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
                                 }
                             }
@@ -458,6 +484,7 @@ class CourseSyncManager(
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Throwable) {
+                            if (e.isYinghuaSessionExpiredError()) throw e
                             onEvent(SyncEvent("warn", "${course.name.ifBlank { course.id }} 去红重新拉取失败：${e.message}", session.platform))
                             break
                         }
@@ -501,6 +528,7 @@ class CourseSyncManager(
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
+                                if (e.isYinghuaSessionExpiredError()) throw e
                                 onEvent(SyncEvent("warn", "${course.name}／${task.name} 去红失败：${e.message}", session.platform))
                                 sleepMillis(10_000L)
                             }
@@ -720,6 +748,7 @@ class CourseSyncManager(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
+                if (e.isYinghuaSessionExpiredError()) throw e
                 val label = if (scope == "work") "作业" else "考试"
                 onEvent(SyncEvent("error", "${nodeTask.name.ifBlank { nodeTask.id }} ${label}答题失败：${e.message}", session.platform))
             }
