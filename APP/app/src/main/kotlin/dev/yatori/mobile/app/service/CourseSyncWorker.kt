@@ -348,8 +348,11 @@ internal fun haiqikejiVideoModelFromSavedConfig(container: AppContainer, platfor
         it.str("account").equals(account, ignoreCase = false) &&
             it.str("accountType").equals(platform, ignoreCase = true)
     } ?: return 1
-    return user.obj("coursesCustom").int("videoModel", 1).takeIf { it in 1..2 } ?: 1
+    return haiqikejiVideoModelFromCoursesCustom(user.obj("coursesCustom"))
 }
+
+internal fun haiqikejiVideoModelFromCoursesCustom(cc: JsonObject): Int =
+    cc.int("videoModel", 1).takeIf { it in 0..2 } ?: 1
 
 internal fun yinghuaVideoModelFromSavedConfig(container: AppContainer, platform: String, account: String): Int {
     if (platform != "yinghua") return 1
@@ -402,9 +405,17 @@ internal fun ruleFromSavedConfig(
             it.str("accountType").equals(platform, ignoreCase = true)
     }
     val cc = user?.obj("coursesCustom") ?: JsonObject()
+    return courseSelectionRuleFromCoursesCustom(platform, cc)
+}
+
+internal fun courseSelectionRuleFromCoursesCustom(platform: String, cc: JsonObject): CourseSelectionRule {
     val include = cc.strings("includeCourses")
     val exclude = cc.strings("excludeCourses")
-    val mode = if (include.isEmpty()) CourseSelectionRule.Mode.ALL else CourseSelectionRule.Mode.MANUAL_CONTAINS
+    val mode = when {
+        platform == "haiqikeji" -> CourseSelectionRule.Mode.EXACT_NAME
+        include.isEmpty() -> CourseSelectionRule.Mode.ALL
+        else -> CourseSelectionRule.Mode.MANUAL_CONTAINS
+    }
     return CourseSelectionRule(mode = mode, includeKeywords = include, excludeKeywords = exclude)
 }
 

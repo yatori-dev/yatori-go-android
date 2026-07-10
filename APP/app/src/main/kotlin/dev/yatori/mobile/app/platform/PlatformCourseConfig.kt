@@ -25,7 +25,7 @@ private val offNormal = listOf(
 private val offNormalFast = listOf(
     IntChoice(0, "不学习"),
     IntChoice(1, "普通模式"),
-    IntChoice(2, "快速模式"),
+    IntChoice(2, "暴力模式"),
 )
 
 private val yinghuaVideo = listOf(

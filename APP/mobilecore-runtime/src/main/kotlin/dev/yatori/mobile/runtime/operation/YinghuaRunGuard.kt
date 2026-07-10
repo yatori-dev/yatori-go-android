@@ -25,10 +25,12 @@ private val yinghuaSessionExpiredMarkers = listOf(
 )
 
 /** Explicit auth-expiry errors must reach the App worker so its captcha-aware re-login can run. */
-internal fun Throwable.isYinghuaSessionExpiredError(): Boolean =
+internal fun Throwable.isSessionExpiredError(): Boolean =
     generateSequence(this) { it.cause }
         .mapNotNull { it.message?.lowercase() }
         .any { message -> yinghuaSessionExpiredMarkers.any(message::contains) }
+
+internal fun Throwable.isYinghuaSessionExpiredError(): Boolean = isSessionExpiredError()
 
 /** Mirrors the console's startDate guard; malformed/missing dates remain runnable. */
 internal fun CourseItem.isYinghuaCourseNotStarted(today: LocalDate = LocalDate.now()): Boolean {

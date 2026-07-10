@@ -87,15 +87,15 @@ class PlatformActionScheduler(
     private val repository: YatoriCoreRepository,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) {
-    suspend fun startHaiqikejiProgress(session: SessionData, task: TaskItem): StoredActionState {
+    suspend fun startHaiqikejiProgress(
+        session: SessionData,
+        task: TaskItem,
+        initialProgress: Double? = null,
+    ): StoredActionState {
         require(session.platform == "haiqikeji") { "haiqikeji progress requires a haiqikeji session" }
-        // Fetch current watch progress so normal-mode can resume from where the user left off,
-        // mirroring console HqkjGetNodeProgressAction + nowTime = progress*0.01*videoDuration.
-        val initialProgress = runCatching {
-            repository.runTask(session, task, mapOf("action" to "getProgress"))
-        }.getOrNull()?.takeIf { it.status == "done" }?.let { jsonDouble(it.raw, "progress") } ?: 0.0
+        val progress = initialProgress ?: jsonDouble(getHaiqikejiProgress(session, task).raw, "progress")
         val result = repository.runTask(session, task, mapOf("action" to "start"))
-        return saveState(session, task, "haiqikeji-progress", result, progress = initialProgress, intervalSeconds = 30)
+        return saveState(session, task, "haiqikeji-progress", result, progress = progress, intervalSeconds = 30)
     }
 
     suspend fun tickHaiqikejiProgress(
@@ -111,6 +111,21 @@ class PlatformActionScheduler(
         val result = repository.runTask(session, state.task, options)
         saveState(session, state.task, "haiqikeji-progress", result, progress = input.progress.toDouble(), intervalSeconds = 30)
         return result
+    }
+
+    suspend fun finishHaiqikejiProgress(session: SessionData, taskId: String): RunTaskResult {
+        val state = requireState(session.platform, session.account, taskId, "haiqikeji-progress")
+        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to "end"))
+        saveState(session, state.task, "haiqikeji-progress", result, progress = state.progress, intervalSeconds = 30)
+        return result
+    }
+
+    suspend fun getHaiqikejiProgress(session: SessionData, task: TaskItem): RunTaskResult =
+        repository.runTask(session, task, mapOf("action" to "getProgress"))
+
+    suspend fun getHaiqikejiProgress(session: SessionData, taskId: String): RunTaskResult {
+        val state = requireState(session.platform, session.account, taskId, "haiqikeji-progress")
+        return getHaiqikejiProgress(session, state.task)
     }
 
     suspend fun startWelearnProgress(session: SessionData, task: TaskItem): StoredActionState {

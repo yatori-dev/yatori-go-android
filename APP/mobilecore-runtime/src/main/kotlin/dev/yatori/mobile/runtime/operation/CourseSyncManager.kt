@@ -15,6 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Collections
+import java.time.LocalDate
 
 interface CourseTaskRunner {
     suspend fun getCourses(session: SessionData): List<CourseItem>
@@ -95,6 +96,27 @@ class CourseSyncManager(
         status.equals("completed", true) || status.equals("done", true) ||
             status.equals("finished", true) || progress >= 100.0
 
+    private fun CourseItem.isHaiqikejiCourseOutOfTerm(today: LocalDate = LocalDate.now()): Boolean {
+        fun date(key: String): LocalDate? {
+            val value = runCatching { raw.get(key)?.asString.orEmpty() }.getOrDefault("").trim()
+            if (value.length < 10) return null
+            return runCatching { LocalDate.parse(value.substring(0, 10)) }.getOrNull()
+        }
+        val startDate = date("startDate")
+        val endDate = date("endDate")
+        return (startDate != null && today.isBefore(startDate)) ||
+            (endDate != null && today.isAfter(endDate))
+    }
+
+    /** Haiqikeji learning modes operate on video nodes; work/exam stay opt-in answer tasks. */
+    private fun shouldRunFlatTask(session: SessionData, task: TaskItem, plan: RunPlan): Boolean {
+        if (session.platform != "haiqikeji") return true
+        if (task.type.equals("video", ignoreCase = true)) return plan.haiqikejiVideoModel != 0
+        if (!plan.answerPolicy.enabled) return false
+        return (task.type.equals("work", ignoreCase = true) && plan.answerPolicy.runWork) ||
+            (task.type.equals("exam", ignoreCase = true) && plan.answerPolicy.runExam)
+    }
+
     private fun RunTaskResult.isSubmittedOrDone(): Boolean {
         val normalized = status.trim()
         return normalized.equals("submitted", ignoreCase = true) ||
@@ -119,16 +141,22 @@ class CourseSyncManager(
         val submitted = ArrayList<String>()
         try {
             val selectedCourses = runner.getCourses(session).filter { plan.rule.matches(it.id, it.name) }
-            val courses = if (session.platform == "yinghua") {
-                selectedCourses.filter { course ->
+            val courses = when (session.platform) {
+                "yinghua" -> selectedCourses.filter { course ->
                     val notStarted = course.isYinghuaCourseNotStarted()
                     if (notStarted) {
                         emit(SyncEvent("info", "${course.name.ifBlank { course.id }} 尚未开课，已跳过", plan.platform))
                     }
                     !notStarted
                 }
-            } else {
-                selectedCourses
+                "haiqikeji" -> selectedCourses.filter { course ->
+                    val outOfTerm = course.isHaiqikejiCourseOutOfTerm()
+                    if (outOfTerm) {
+                        emit(SyncEvent("info", "${course.name.ifBlank { course.id }} 不在开课时间内，已跳过", plan.platform))
+                    }
+                    !outOfTerm
+                }
+                else -> selectedCourses
             }
             emit(SyncEvent("info", "共 ${courses.size} 门课程", plan.platform))
 
@@ -166,6 +194,7 @@ class CourseSyncManager(
                 if (controller.isCancelling(opId)) break
                 xuexitongOrderedTasks(session, course, plan, opId, emit)
                     .filter { !it.isFinished() && it.id !in plan.completedTaskIds }
+                    .filter { shouldRunFlatTask(session, it, plan) }
                     .forEach { pending.add(Pending(course, it)) }
             }
             controller.updateProgress(opId, completed = 0, total = pending.size, detail = "共 ${pending.size} 个任务")
@@ -183,6 +212,7 @@ class CourseSyncManager(
                             emit(SyncEvent("info", "${p.course.name}／${p.task.name}：${r.status}", plan.platform))
                         }
                         .onFailure { e ->
+                            if (e.isSessionExpiredError()) throw e
                             emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
                         }
                     controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })

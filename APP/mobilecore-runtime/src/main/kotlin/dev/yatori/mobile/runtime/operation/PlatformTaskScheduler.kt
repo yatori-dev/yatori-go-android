@@ -82,37 +82,58 @@ class PlatformTaskScheduler(
         shouldCancel: () -> Boolean,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
-        val started = actions.startHaiqikejiProgress(session, task)
-        val videoDuration = durationSeconds(started.task.raw, "videoDuration", "duration", "timeLength", "videoLength")
-            .takeIf { it > 0 } ?: 30
+        var verified = actions.getHaiqikejiProgress(session, task)
+        var verifiedProgress = jsonDouble(verified.raw, "progress")
+        if (options.videoModel != 2 && verifiedProgress >= 100.0) return verified
 
-        if (options.videoModel == 2) {
-            // Fast mode: start, sleep 30 s, submit 100 %, end — mirrors console fastModeAction.
-            sleepBeforeTick(1, 30)
-            if (shouldCancel()) return RunTaskResult(session.platform, task.id, "started", raw = started.raw)
-            val last = actions.tickHaiqikejiProgress(session, task.id, PercentTickInput(100, finish = true))
-            onEvent(tickEvent(session.platform, task, 1, 1, 100))
-            return last
+        val maxStudyCycles = max(1, options.maxTicksPerTask)
+        for (cycle in 1..maxStudyCycles) {
+            val started = actions.startHaiqikejiProgress(session, task, verifiedProgress)
+            val videoDuration = durationSeconds(started.task.raw, "videoDuration", "duration", "timeLength", "videoLength")
+                .takeIf { it > 0 } ?: 30
+
+            if (options.videoModel == 2) {
+                // Console fastModeAction waits 30 s, submits 100 %, ends, then verifies.
+                sleepMillis(30_000L)
+                if (shouldCancel()) return actions.finishHaiqikejiProgress(session, task.id)
+                actions.tickHaiqikejiProgress(session, task.id, PercentTickInput(100, finish = false))
+                onEvent(tickEvent(session.platform, task, 1, 1, 100))
+            } else {
+                // Console normalModeAction resumes from server progress and waits before every 30 s tick.
+                var nowTime = ((verifiedProgress / 100.0) * videoDuration).toInt().coerceAtLeast(0)
+                val ticks = max(1, ceil((videoDuration - nowTime).toDouble() / 30.0).toInt())
+                for (i in 1..ticks) {
+                    if (shouldCancel()) return actions.finishHaiqikejiProgress(session, task.id)
+                    sleepMillis(30_000L)
+                    if (shouldCancel()) return actions.finishHaiqikejiProgress(session, task.id)
+                    nowTime = min(videoDuration, nowTime + 30)
+                    val submitProgress = min(100, (nowTime.toDouble() / videoDuration * 100).toInt())
+                    actions.tickHaiqikejiProgress(
+                        session,
+                        task.id,
+                        PercentTickInput(submitProgress, finish = false),
+                    )
+                    onEvent(tickEvent(session.platform, task, i, ticks, submitProgress))
+                    if (nowTime >= videoDuration) break
+                }
+            }
+
+            actions.finishHaiqikejiProgress(session, task.id)
+            verified = actions.getHaiqikejiProgress(session, task.id)
+            verifiedProgress = jsonDouble(verified.raw, "progress")
+            if (verifiedProgress >= 100.0) return verified
+
+            onEvent(SyncEvent("warn", "${task.name.ifBlank { task.id }} 服务端进度=$verifiedProgress%，重新学习", session.platform))
+            if (options.videoModel == 2 && cycle < maxStudyCycles) {
+                // fastModeAction also waits after a failed verification before opening the next session.
+                sleepMillis(30_000L)
+            }
         }
 
-        // Normal mode: resume from current progress, tick every 30 s with incremental progress.
-        // Mirrors console normalModeAction: nowTime += 30 each tick, submitProgress = nowTime/dur*100.
-        var nowTime = ((started.progress / 100.0) * videoDuration).toInt().coerceAtLeast(0)
-        if (nowTime >= videoDuration) {
-            return RunTaskResult(session.platform, task.id, "done", "already complete", raw = started.raw)
-        }
-        val ticks = min(options.maxTicksPerTask, max(1, ceil((videoDuration - nowTime).toDouble() / 30.0).toInt()))
-        var last = RunTaskResult(session.platform, task.id, "started", raw = started.raw)
-        for (i in 1..ticks) {
-            if (shouldCancel()) return last
-            sleepBeforeTick(i, 30)
-            nowTime = min(videoDuration, nowTime + 30)
-            val submitProgress = min(100, (nowTime.toDouble() / videoDuration * 100).toInt())
-            last = actions.tickHaiqikejiProgress(session, task.id, PercentTickInput(submitProgress, finish = nowTime >= videoDuration))
-            onEvent(tickEvent(session.platform, task, i, ticks, submitProgress))
-            if (nowTime >= videoDuration) break
-        }
-        return last
+        error(
+            "haiqikeji: progress remained below 100 after $maxStudyCycles study cycles " +
+                "(last=$verifiedProgress)",
+        )
     }
 
     private suspend fun runWelearn(

@@ -2,6 +2,7 @@ package dev.yatori.mobile.app.service
 
 import com.google.gson.JsonObject
 import dev.yatori.mobile.runtime.operation.AnswerMode
+import dev.yatori.mobile.runtime.operation.CourseSelectionRule
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -106,6 +107,28 @@ class CourseSyncWorkerConfigTest {
         val mode = yinghuaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) })
 
         assertEquals(0, mode)
+    }
+
+    @Test
+    fun `haiqikeji video mode zero disables video learning`() {
+        val mode = haiqikejiVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) })
+
+        assertEquals(0, mode)
+    }
+
+    @Test
+    fun `haiqikeji saved course lists use exact name matching`() {
+        val rule = courseSelectionRuleFromCoursesCustom(
+            "haiqikeji",
+            JsonObject().apply {
+                add("includeCourses", com.google.gson.JsonArray().apply { add("数学") })
+                add("excludeCourses", com.google.gson.JsonArray().apply { add("英语") })
+            },
+        )
+
+        assertEquals(CourseSelectionRule.Mode.EXACT_NAME, rule.mode)
+        assertTrue(rule.matches("id", "数学"))
+        assertFalse(rule.matches("id", "高等数学"))
     }
 
 }

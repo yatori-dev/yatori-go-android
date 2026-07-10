@@ -3,6 +3,9 @@ package mobilecore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -18,6 +21,36 @@ func fakeHqkjNodeProvider(raw string) func() {
 }
 
 const hqkjFakeNodes = `{"code":200,"data":[{"id":1,"name":"第一章","children":[{"id":101,"name":"视频1","tabVideo":1,"tabFile":0,"tabExam":0,"tabWork":0},{"id":102,"name":"文档1","tabVideo":0,"tabFile":1,"tabExam":0,"tabWork":0}]},{"id":2,"name":"第二章","children":[{"id":201,"name":"考试1","tabVideo":0,"tabFile":0,"tabExam":1,"tabWork":0}]}]}`
+
+func TestGetCoursesHaiqikeji_PreservesCourseDates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":200,"data":[{"id":7,"name":"课程","startDate":"2026-03-01","endDate":"2026-07-31"}]}`)
+	}))
+	defer server.Close()
+
+	result, err := getCoursesHaiqikeji(SessionData{
+		Platform: "haiqikeji",
+		Token:    "tok",
+		Extra: map[string]interface{}{
+			"preUrl":   server.URL,
+			"userId":   "1",
+			"schoolId": "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("getCoursesHaiqikeji: %v", err)
+	}
+	if len(result.Courses) != 1 {
+		t.Fatalf("courses=%d, want 1", len(result.Courses))
+	}
+	if got := strOf(result.Courses[0].Raw["startDate"]); got != "2026-03-01" {
+		t.Fatalf("raw.startDate=%q", got)
+	}
+	if got := strOf(result.Courses[0].Raw["endDate"]); got != "2026-07-31" {
+		t.Fatalf("raw.endDate=%q", got)
+	}
+}
 
 func TestGetTasksHaiqikeji_Success(t *testing.T) {
 	resetState()
@@ -52,6 +85,16 @@ func TestGetTasksHaiqikeji_Success(t *testing.T) {
 	}
 	if result.Tasks[2].Type != "exam" {
 		t.Fatalf("task[2].type=%q, want exam", result.Tasks[2].Type)
+	}
+}
+
+func TestNodeTypeHaiqikeji_AnyPositiveTabVideoIsVideo(t *testing.T) {
+	got := nodeType(map[string]interface{}{
+		"tabVideo": float64(2),
+		"tabFile":  float64(1),
+	})
+	if got != "video" {
+		t.Fatalf("nodeType(tabVideo=2)=%q, want video", got)
 	}
 }
 
@@ -429,6 +472,38 @@ func TestRunTaskHaiqikeji_ActionSubmit(t *testing.T) {
 	}
 	if res.Raw["progress"] != float64(50) {
 		t.Fatalf("raw.progress=%v, want 50", res.Raw["progress"])
+	}
+}
+
+func TestRunTaskHaiqikeji_ActionEndCallsEndStudy(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":200,"data":null}`)
+	}))
+	defer server.Close()
+
+	sessJSON := fmt.Sprintf(`{"platform":"haiqikeji","token":"tok","extra":{"preUrl":%q}}`, server.URL)
+	taskJSON := `{"platform":"haiqikeji","id":"node-1","raw":{"sessionId":"session-9"},"options":{"action":"end"}}`
+	e := parseEnvelope(t, RunTask(sessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=end should succeed: %s", e.Error)
+	}
+	if gotPath != "/api/user/study_session_end" {
+		t.Fatalf("action=end called %q, want /api/user/study_session_end", gotPath)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "ended" {
+		t.Fatalf("expected ended, got %q", res.Status)
+	}
+	if res.Raw["sessionId"] != "session-9" {
+		t.Fatalf("raw.sessionId=%v, want session-9", res.Raw["sessionId"])
 	}
 }
 

@@ -568,6 +568,103 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `haiqikeji normal plan runs only video tasks when answering is disabled`() = runTest {
+        val hqSession = SessionData("haiqikeji", "stu")
+        val tasks = listOf(
+            TaskItem("video1", name = "video", type = "video", platform = "haiqikeji"),
+            TaskItem("doc1", name = "document", type = "document", platform = "haiqikeji"),
+            TaskItem("work1", name = "work", type = "work", platform = "haiqikeji"),
+            TaskItem("exam1", name = "exam", type = "exam", platform = "haiqikeji"),
+        )
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("c1", name = "course", platform = "haiqikeji")),
+            tasksByCourse = mapOf("c1" to tasks),
+        )
+        val platformRunner = FakePlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(hqSession, RunPlan("hq-video-only", "haiqikeji", "stu"))
+
+        assertEquals(listOf("video1"), submitted)
+        assertEquals(listOf("video1"), platformRunner.submitted)
+        assertTrue(runner.submitted.isEmpty())
+    }
+
+    @Test
+    fun `haiqikeji skips courses outside their active date range`() = runTest {
+        fun datedCourse(id: String, startDate: String, endDate: String) =
+            CourseItem(id, name = id, platform = "haiqikeji", raw = JsonObject().apply {
+                addProperty("startDate", startDate)
+                addProperty("endDate", endDate)
+            })
+        val courses = listOf(
+            datedCourse("future", "2999-01-01", "2999-12-31"),
+            datedCourse("expired", "2000-01-01", "2000-12-31"),
+            datedCourse("active", "2000-01-01", "2999-12-31"),
+        )
+        val runner = FakeRunner(
+            courses = courses,
+            tasksByCourse = courses.associate { course ->
+                course.id to listOf(TaskItem("${course.id}-video", type = "video", platform = "haiqikeji"))
+            },
+        )
+        val platformRunner = FakePlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(SessionData("haiqikeji", "stu"), RunPlan("hq-dates", "haiqikeji", "stu"))
+
+        assertEquals(listOf("active-video"), submitted)
+        assertEquals(listOf("active-video"), platformRunner.submitted)
+    }
+
+    @Test
+    fun `haiqikeji task expiry propagates to host relogin`() = runTest {
+        val hqSession = SessionData("haiqikeji", "stu")
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("c1", name = "course", platform = "haiqikeji")),
+            tasksByCourse = mapOf("c1" to listOf(TaskItem("video1", type = "video", platform = "haiqikeji"))),
+        )
+        val expiringPlatform = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = true
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult = throw IllegalStateException("haiqikeji: session expired, please re-login")
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), expiringPlatform)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(hqSession, RunPlan("hq-expired", "haiqikeji", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("session expired"))
+    }
+
+    @Test
+    fun `haiqikeji video mode zero does not schedule video tasks`() = runTest {
+        val hqSession = SessionData("haiqikeji", "stu")
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("c1", name = "course", platform = "haiqikeji")),
+            tasksByCourse = mapOf(
+                "c1" to listOf(TaskItem("video1", name = "video", type = "video", platform = "haiqikeji")),
+            ),
+        )
+        val platformRunner = FakePlatformRunner()
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner)
+
+        val submitted = mgr.run(
+            hqSession,
+            RunPlan("hq-disabled", "haiqikeji", "stu", haiqikejiVideoModel = 0),
+        )
+
+        assertTrue(submitted.isEmpty())
+        assertTrue(platformRunner.submitted.isEmpty())
+    }
+
+    @Test
     fun `generic task captcha is handed to resolver and original task is counted`() = runTest {
         val challengeRaw = JsonObject().apply { addProperty("captchaImage", "base64") }
         val runner = object : CourseTaskRunner {
@@ -628,6 +725,24 @@ class CourseSyncManagerTest {
         val op = controller.operations.value.single()
         assertEquals(OperationStatus.DONE, op.status)
         assertTrue(op.detail.contains("cancelled"))
+    }
+
+    @Test
+    fun `exact course name rule matches console include and exclude semantics`() {
+        val includeRule = CourseSelectionRule(
+            mode = CourseSelectionRule.Mode.EXACT_NAME,
+            includeKeywords = listOf("数学"),
+        )
+        val excludeRule = CourseSelectionRule(
+            mode = CourseSelectionRule.Mode.EXACT_NAME,
+            excludeKeywords = listOf("数学"),
+        )
+
+        assertTrue(includeRule.matches("math-id", "数学"))
+        assertFalse(includeRule.matches("数学", "高等数学"))
+        assertFalse(includeRule.matches("math-id", "数学基础"))
+        assertFalse(excludeRule.matches("math-id", "数学"))
+        assertTrue(excludeRule.matches("math-id", "高等数学"))
     }
 
     @Test

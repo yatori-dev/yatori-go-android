@@ -14,9 +14,13 @@ data class CourseSelectionRule(
     /** Explicit course ids for [Mode.SELECTED]. */
     val selectedCourseIds: List<String> = emptyList(),
 ) {
-    enum class Mode { ALL, SELECTED, MANUAL_CONTAINS }
+    enum class Mode { ALL, SELECTED, MANUAL_CONTAINS, EXACT_NAME }
 
     fun matches(courseId: String, courseName: String): Boolean {
+        if (mode == Mode.EXACT_NAME) {
+            if (excludeKeywords.any { it == courseName }) return false
+            return includeKeywords.isEmpty() || includeKeywords.any { it == courseName }
+        }
         if (excludeKeywords.any { kw -> courseId.contains(kw, ignoreCase = true) || courseName.contains(kw, ignoreCase = true) }) {
             return false
         }
@@ -26,6 +30,7 @@ data class CourseSelectionRule(
             Mode.MANUAL_CONTAINS ->
                 includeKeywords.isEmpty() ||
                     includeKeywords.any { kw -> courseId.contains(kw, ignoreCase = true) || courseName.contains(kw, ignoreCase = true) }
+            Mode.EXACT_NAME -> error("handled above")
         }
     }
 }

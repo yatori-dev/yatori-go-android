@@ -34,14 +34,12 @@ class PlatformTaskSchedulerTest {
     fun tearDown() { tmp.deleteRecursively() }
 
     @Test
-    fun `haiqikeji task scheduler drives start submit end and persists raw`() = runTest {
+    fun `haiqikeji task scheduler drives start submit end verify and persists raw`() = runTest {
         val session = SessionData("haiqikeji", "stu")
         val task = TaskItem("node1", name = "video", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
             addProperty("courseId", "course1")
             addProperty("duration", 60)
         })
-        // startHaiqikejiProgress first calls getProgress to resume the watch position
-        // (mirrors console HqkjGetNodeProgressAction), so the sequence is getProgress→start→submit→end.
         gateway.results.add(RunTaskResult("haiqikeji", "node1", "done", raw = JsonObject().apply {
             addProperty("progress", 0)
         }))
@@ -56,17 +54,234 @@ class PlatformTaskSchedulerTest {
             addProperty("sessionId", "sid-1")
             addProperty("progress", 100)
         }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "ended", raw = JsonObject().apply {
+            addProperty("sessionId", "sid-1")
+        }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "done", raw = JsonObject().apply {
+            addProperty("progress", 100)
+        }))
 
         val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
 
-        assertEquals("submitted", result.status)
-        assertEquals(listOf("getProgress", "start", "submit", "end"), gateway.options.map { it["action"] })
+        assertEquals("done", result.status)
+        assertEquals(listOf("getProgress", "start", "submit", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
         assertEquals(50, gateway.options[2]["progress"])
         assertEquals(100, gateway.options[3]["progress"])
-        assertEquals(listOf(30_000L), gateway.sleeps)
+        assertEquals(listOf(30_000L, 30_000L), gateway.sleeps)
         val state = store.loadActionState("haiqikeji", "stu", "node1", "haiqikeji-progress")!!
         assertEquals("sid-1", state.task.raw.get("sessionId").asString)
         assertEquals(100.0, state.progress)
+    }
+
+    @Test
+    fun `haiqikeji normal mode waits before first progress submission`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 30)
+        })
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "done", raw = JsonObject().apply {
+            addProperty("progress", 0)
+        }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "started", raw = JsonObject().apply {
+            addProperty("sessionId", "sid-1")
+        }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "submitted", raw = JsonObject().apply {
+            addProperty("sessionId", "sid-1")
+            addProperty("progress", 100)
+        }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "ended", raw = JsonObject().apply {
+            addProperty("sessionId", "sid-1")
+        }))
+        gateway.results.add(RunTaskResult("haiqikeji", "node1", "done", raw = JsonObject().apply {
+            addProperty("progress", 100)
+        }))
+
+        taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+
+        assertEquals(listOf(30_000L), gateway.sleeps)
+    }
+
+    @Test
+    fun `haiqikeji retries a full study cycle when verified progress is below 100`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 30)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("submitted", progress = 100, sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+            result("done", progress = 80),
+            result("started", sessionId = "sid-2"),
+            result("submitted", progress = 100, sessionId = "sid-2"),
+            result("ended", sessionId = "sid-2"),
+            result("done", progress = 100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+
+        assertEquals("done", result.status)
+        assertEquals(100.0, result.raw.get("progress").asDouble)
+        assertEquals(
+            listOf("getProgress", "start", "submit", "end", "getProgress", "start", "submit", "end", "getProgress"),
+            gateway.options.map { it["action"] },
+        )
+        assertEquals(listOf(30_000L, 30_000L), gateway.sleeps)
+    }
+
+    @Test
+    fun `haiqikeji cancellation during wait ends session without submitting another tick`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 60)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+        ).forEach(gateway.results::add)
+        var cancelled = false
+        val repo = YatoriCoreRepository(gateway, store)
+        val scheduler = PlatformTaskScheduler(
+            PlatformActionScheduler(repo, now = { 1000L }),
+            sleepMillis = {
+                gateway.sleeps.add(it)
+                cancelled = true
+            },
+        )
+
+        val result = scheduler.runTask(
+            session,
+            task,
+            PlatformTaskRunOptions(maxTicksPerTask = 10),
+            shouldCancel = { cancelled },
+        )
+
+        assertEquals("ended", result.status)
+        assertEquals(listOf("getProgress", "start", "end"), gateway.options.map { it["action"] })
+        assertEquals(listOf(30_000L), gateway.sleeps)
+    }
+
+    @Test
+    fun `haiqikeji normal video is not truncated by generic max tick limit`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 60)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("submitted", progress = 50, sessionId = "sid-1"),
+            result("submitted", progress = 100, sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+            result("done", progress = 100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(
+            session,
+            task,
+            PlatformTaskRunOptions(maxTicksPerTask = 1),
+        )
+
+        assertEquals("done", result.status)
+        assertEquals(
+            listOf("getProgress", "start", "submit", "submit", "end", "getProgress"),
+            gateway.options.map { it["action"] },
+        )
+        assertEquals(listOf(30_000L, 30_000L), gateway.sleeps)
+    }
+
+    @Test
+    fun `haiqikeji progress ticks do not consume verification cycle budget`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 60)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("submitted", progress = 50, sessionId = "sid-1"),
+            result("submitted", progress = 100, sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+            result("done", progress = 80),
+            result("started", sessionId = "sid-2"),
+            result("submitted", progress = 100, sessionId = "sid-2"),
+            result("ended", sessionId = "sid-2"),
+            result("done", progress = 100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(
+            session,
+            task,
+            PlatformTaskRunOptions(maxTicksPerTask = 2),
+        )
+
+        assertEquals("done", result.status)
+        assertEquals(
+            listOf(
+                "getProgress", "start", "submit", "submit", "end", "getProgress",
+                "start", "submit", "end", "getProgress",
+            ),
+            gateway.options.map { it["action"] },
+        )
+        assertEquals(listOf(30_000L, 30_000L, 30_000L), gateway.sleeps)
+    }
+
+    @Test
+    fun `haiqikeji fast mode submits 100 before ending the session`() = runTest {
+        val session = SessionData("haiqikeji", "stu")
+        val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {
+            addProperty("courseId", "course1")
+            addProperty("duration", 30)
+        })
+        fun result(status: String, progress: Int? = null, sessionId: String? = null) =
+            RunTaskResult("haiqikeji", "node1", status, raw = JsonObject().apply {
+                progress?.let { addProperty("progress", it) }
+                sessionId?.let { addProperty("sessionId", it) }
+            })
+        listOf(
+            result("done", progress = 0),
+            result("started", sessionId = "sid-1"),
+            result("submitted", progress = 100, sessionId = "sid-1"),
+            result("ended", sessionId = "sid-1"),
+            result("done", progress = 100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(
+            session,
+            task,
+            PlatformTaskRunOptions(maxTicksPerTask = 10, videoModel = 2),
+        )
+
+        assertEquals("done", result.status)
+        assertEquals(listOf("getProgress", "start", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
+        assertEquals(100, gateway.options[2]["progress"])
     }
 
     @Test

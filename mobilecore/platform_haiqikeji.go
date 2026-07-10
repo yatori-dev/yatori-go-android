@@ -65,7 +65,14 @@ func getCoursesHaiqikeji(sess SessionData) (CourseListResult, error) {
 			if name == "" {
 				name, _ = jStr(m["courseName"])
 			}
-			items = append(items, CourseItem{ID: id, Name: name})
+			rawCourse := map[string]interface{}{}
+			if startDate, ok := jStr(m["startDate"]); ok {
+				rawCourse["startDate"] = startDate
+			}
+			if endDate, ok := jStr(m["endDate"]); ok {
+				rawCourse["endDate"] = endDate
+			}
+			items = append(items, CourseItem{ID: id, Name: name, Raw: rawCourse})
 		}
 	}
 	return CourseListResult{Platform: "haiqikeji", Courses: items}, nil
@@ -136,7 +143,7 @@ func getTasksHaiqikeji(sess SessionData, input CourseInput) (TaskListResult, err
 }
 
 func nodeType(nd map[string]interface{}) string {
-	if v, _ := nd["tabVideo"].(float64); v == 1 {
+	if v, _ := nd["tabVideo"].(float64); v > 0 {
 		return "video"
 	}
 	if v, _ := nd["tabFile"].(float64); v == 1 {
@@ -198,13 +205,18 @@ var hqkjSubmitStudyProvider = func(cache *haiqikejiApi.HqkjUserCache, sessionId 
 	return cache.SubmitStudyTimeApi(sessionId, progress, 3, nil)
 }
 
+// hqkjEndStudyProvider calls EndStudyApi; replaceable for tests.
+var hqkjEndStudyProvider = func(cache *haiqikejiApi.HqkjUserCache, sessionId string) (string, error) {
+	return cache.EndStudyApi(sessionId, 3, nil)
+}
+
 // runTaskHaiqikeji drives a haiqikeji study step.
 //
 // The Android host owns the loop/mode; mobile-core exposes single-step primitives
 // selected by options.action:
 //   - "start": StartStudyApi only; returns raw.sessionId for the host to reuse.
 //   - "submit"/"continue": one SubmitStudyTime(progress) against a host-supplied sessionId.
-//   - "end": final SubmitStudyTime (default progress=100) against the sessionId.
+//   - "end": EndStudyApi against the host-supplied sessionId.
 //   - "" (legacy): combined StartStudy+SubmitStudyTime one-shot (progress default 100),
 //     now also surfacing raw.sessionId.
 //
@@ -252,7 +264,7 @@ func runTaskHaiqikeji(sess SessionData, input TaskInput) (RunTaskResult, error) 
 		SchoolId: strOf(sess.Extra["schoolId"]),
 	}
 
-	// submit-only paths: the host already holds a sessionId from a prior "start".
+	// Session-only paths: the host already holds a sessionId from a prior "start".
 	if action == "submit" || action == "continue" || action == "end" {
 		sessionId := strOf(input.Raw["sessionId"])
 		if sessionId == "" {
@@ -260,6 +272,14 @@ func runTaskHaiqikeji(sess SessionData, input TaskInput) (RunTaskResult, error) 
 		}
 		if sessionId == "" {
 			return RunTaskResult{}, fmt.Errorf("haiqikeji: action=%s requires raw.sessionId from a prior action=start", action)
+		}
+		if action == "end" {
+			if err := hqkjEndParsed(cache, sessionId); err != nil {
+				return RunTaskResult{}, err
+			}
+			return RunTaskResult{Platform: "haiqikeji", TaskID: nodeId, Status: "ended",
+				Message: "study session ended",
+				Raw:     map[string]interface{}{"sessionId": sessionId}}, nil
 		}
 		if err := hqkjSubmitParsed(cache, sessionId, progress); err != nil {
 			return RunTaskResult{}, err
@@ -325,6 +345,21 @@ func hqkjSubmitParsed(cache *haiqikejiApi.HqkjUserCache, sessionId string, progr
 	}
 	if c, _ := jFloat(gojsonq.New().JSONString(submitRaw).Find("code")); int(c) != 200 {
 		return fmt.Errorf("haiqikeji: submit study time failed (code=%d)", int(c))
+	}
+	return nil
+}
+
+// hqkjEndParsed calls EndStudyApi and validates the response.
+func hqkjEndParsed(cache *haiqikejiApi.HqkjUserCache, sessionId string) error {
+	endRaw, err := hqkjEndStudyProvider(cache, sessionId)
+	if err != nil {
+		return err
+	}
+	if containsAuthErr(endRaw) {
+		return fmt.Errorf("haiqikeji: session expired, please re-login")
+	}
+	if c, _ := jFloat(gojsonq.New().JSONString(endRaw).Find("code")); int(c) != 200 {
+		return fmt.Errorf("haiqikeji: end study failed (code=%d)", int(c))
 	}
 	return nil
 }
