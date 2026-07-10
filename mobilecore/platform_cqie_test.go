@@ -164,7 +164,7 @@ func TestStartLoginCqie_CaptchaError(t *testing.T) {
 
 // --- GetCourses ---
 
-const cqieFakeCourses = `{"msg":"操作成功","data":{"records":[{"id":"c1","name":"课程A","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","learned":"50%"}]}}`
+const cqieFakeCourses = `{"msg":"操作成功","data":{"records":[{"id":"c1","name":"课程A","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","learned":"50%","sumTime":"01:00","haveTime":"00:30"}]}}`
 
 func TestGetCoursesCqie_RawFields(t *testing.T) {
 	resetState()
@@ -187,6 +187,28 @@ func TestGetCoursesCqie_RawFields(t *testing.T) {
 		if _, ok := raw[f]; !ok {
 			t.Errorf("course Raw missing %q", f)
 		}
+	}
+}
+
+func TestGetCoursesCqie_SkipsNonVideoRecords(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	raw := `{"msg":"操作成功","data":{"records":[` +
+		`{"id":"video-course","name":"视频课","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","sumTime":"01:00","haveTime":"00:00"},` +
+		`{"id":"other-course","name":"非视频课","studentCourseId":"sc2","coursewareId":"cw2","version":"v1"}` +
+		`]}}`
+	restore := fakeCqieCourses(raw, nil)
+	defer restore()
+
+	e := parseEnvelope(t, GetCourses(cqieSessJSON))
+	if !e.OK {
+		t.Fatalf("GetCourses failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res CourseListResult
+	json.Unmarshal(b, &res)
+	if len(res.Courses) != 1 || res.Courses[0].ID != "video-course" {
+		t.Fatalf("courses=%+v, want only video-course", res.Courses)
 	}
 }
 
@@ -260,6 +282,40 @@ func TestGetTasksCqie_Success(t *testing.T) {
 		if _, ok := raw[f]; !ok {
 			t.Errorf("task Raw missing %q", f)
 		}
+	}
+}
+
+func TestGetTasksCqie_ParsesProgressAndSegments(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	raw := `{"msg":"操作成功","data":[{"children":[{"courseCatalogVideoVos":[{` +
+		`"id":"v1","courseId":"c1","unitId":"u1","name":"视频1","timeLength":60,"haveTime":"00:01:00",` +
+		`"courseCatalogVideoSegments":[{"courseId":"c1","unitId":"u1","segmentName":"分段1",` +
+		`"videoSegmentKnowledgeTimeRangesVos":[{"id":"sk1","segmentId":"seg1","knowledgeNodeId":"kn1","startTimeStr":"00:00","endTimeStr":"00:30"}]}]` +
+		`}]}]}]}`
+	restore := fakeCqieDetail(raw, nil)
+	defer restore()
+
+	e := parseEnvelope(t, GetTasks(cqieSessJSON, cqieCourseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 1 {
+		t.Fatalf("tasks=%d, want 1", len(res.Tasks))
+	}
+	task := res.Tasks[0]
+	if task.Progress != 100 || task.Status != "completed" {
+		t.Fatalf("progress/status=(%v,%q), want (100,completed)", task.Progress, task.Status)
+	}
+	if task.Raw["studyTime"] != float64(60) {
+		t.Fatalf("raw.studyTime=%v, want 60", task.Raw["studyTime"])
+	}
+	segments, ok := task.Raw["segments"].([]interface{})
+	if !ok || len(segments) != 1 {
+		t.Fatalf("raw.segments=%#v, want one segment", task.Raw["segments"])
 	}
 }
 
@@ -404,16 +460,15 @@ func TestRunTaskCqie_StartVideoNonSuccess(t *testing.T) {
 
 // --- host-driven action primitives ---
 
-func TestRunTaskCqie_ActionStart(t *testing.T) {
+func TestRunTaskCqie_ActionStartUsesConsoleSaveHandshake(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
-	restoreStart := fakeCqieStartVideo(cqieFakeStartVideo, nil)
+	restoreStart := fakeCqieStartVideo("", errors.New("studyVideo must not be called"))
 	defer restoreStart()
-	// Save must NOT be called on action=start; error provider proves it.
-	restoreSave := fakeCqieSaveStudy("", errors.New("save must not be called"))
+	restoreSave := fakeCqieSaveStudy(cqieFakeSave, nil)
 	defer restoreSave()
 
-	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","timeLength":300},"options":{"action":"start"}}`
+	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","timeLength":300,"studyTime":12},"options":{"action":"start"}}`
 	e := parseEnvelope(t, RunTask(cqieSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("action=start should succeed: %s", e.Error)
@@ -427,8 +482,80 @@ func TestRunTaskCqie_ActionStart(t *testing.T) {
 	if res.Raw["studyId"] != "study-1" {
 		t.Fatalf("raw.studyId=%v, want study-1", res.Raw["studyId"])
 	}
-	if _, ok := res.Raw["maxCurrentPos"]; !ok {
-		t.Fatal("raw.maxCurrentPos must be present after start")
+	if res.Raw["maxCurrentPos"] != float64(12) {
+		t.Fatalf("raw.maxCurrentPos=%v, want 12", res.Raw["maxCurrentPos"])
+	}
+}
+
+func TestRunTaskCqie_ActionStartSavesSegmentsAndAnswersEmbeddedWork(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restoreSave := fakeCqieSaveStudy(cqieFakeSave, nil)
+	defer restoreSave()
+
+	origSegment := cqieSaveSegmentProvider
+	origPullWork := cqiePullVideoWorkProvider
+	origSubmitWork := cqieSubmitWorkAnswerProvider
+	var segmentID, maxCurrentPos, submittedAnswer string
+	cqieSaveSegmentProvider = func(_ *cqieApi.CqieUserCache, _, _, _, _, _, gotSegmentID, gotMaxCurrentPos, _ string, _, _ int) (string, error) {
+		segmentID, maxCurrentPos = gotSegmentID, gotMaxCurrentPos
+		return `{"msg":"操作成功","data":{}}`, nil
+	}
+	cqiePullVideoWorkProvider = func(_ *cqieApi.CqieUserCache, knowledgeNodeID, _, _ string) (string, error) {
+		if knowledgeNodeID != "sk1" {
+			t.Fatalf("work lookup id=%q, want sk1", knowledgeNodeID)
+		}
+		return `{"code":200,"data":[{"id":"q1","courseId":"c1","unitId":"u1","knowledgeNodeId":"kn1","questionType":1,"referenceAnswer":"B","status":0}]}`, nil
+	}
+	cqieSubmitWorkAnswerProvider = func(_ *cqieApi.CqieUserCache, answerJSON string) (string, error) {
+		submittedAnswer = answerJSON
+		return `{"code":200,"msg":"操作成功"}`, nil
+	}
+	defer func() {
+		cqieSaveSegmentProvider = origSegment
+		cqiePullVideoWorkProvider = origPullWork
+		cqieSubmitWorkAnswerProvider = origSubmitWork
+	}()
+
+	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","timeLength":60,"studyTime":12,"segments":[{"id":"sk1","segmentId":"seg1","knowledgeNodeId":"kn1","courseId":"c1","unitId":"u1"}]},"options":{"action":"start"}}`
+	e := parseEnvelope(t, RunTask(cqieSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=start should succeed: %s", e.Error)
+	}
+	if segmentID != "sk1" || maxCurrentPos != "12" {
+		t.Fatalf("segment save=(%q,%q), want (sk1,12)", segmentID, maxCurrentPos)
+	}
+	var payload struct {
+		StudentCourseId    string `json:"studentCourseId"`
+		UnitId             string `json:"unitId"`
+		CourseId           string `json:"courseId"`
+		SegmentKnowledgeId string `json:"segmentKnowledgeId"`
+		StudentId          string `json:"studentId"`
+		VideoId            string `json:"videoId"`
+		DeptId             string `json:"deptId"`
+		MajorId            string `json:"majorId"`
+		Version            string `json:"version"`
+		OrgId              string `json:"orgId"`
+		PoList             []struct {
+			SubmitAnswer       string `json:"submitAnswer"`
+			ExercisesId        string `json:"exercisesId"`
+			QuestionType       int    `json:"questionType"`
+			ReferenceAnswer    string `json:"referenceAnswer"`
+			SegmentKnowledgeId string `json:"segmentKnowledgeId"`
+		} `json:"poList"`
+	}
+	if err := json.Unmarshal([]byte(submittedAnswer), &payload); err != nil {
+		t.Fatalf("decode submitted answer payload: %v", err)
+	}
+	if payload.StudentCourseId != "sc1" || payload.UnitId != "u1" || payload.CourseId != "c1" ||
+		payload.SegmentKnowledgeId != "sk1" || payload.StudentId != "st1" || payload.VideoId != "v1" ||
+		payload.DeptId != "d1" || payload.MajorId != "m1" || payload.Version != "v1" || payload.OrgId != "o1" {
+		t.Fatalf("submitted answer identity fields mismatch: %+v", payload)
+	}
+	if len(payload.PoList) != 1 || payload.PoList[0].SubmitAnswer != "B" ||
+		payload.PoList[0].ExercisesId != "q1" || payload.PoList[0].QuestionType != 1 ||
+		payload.PoList[0].ReferenceAnswer != "B" || payload.PoList[0].SegmentKnowledgeId != "kn1" {
+		t.Fatalf("submitted answer question fields mismatch: %+v", payload.PoList)
 	}
 }
 
@@ -454,6 +581,78 @@ func TestRunTaskCqie_ActionSubmit(t *testing.T) {
 	}
 	if res.Raw["maxPos"] != float64(3) {
 		t.Fatalf("raw.maxPos=%v, want 3", res.Raw["maxPos"])
+	}
+}
+
+func TestRunTaskCqie_ActionEndUsesConsoleFinalSave(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restoreSubmit := fakeCqieSubmitStudy("", errors.New("submit must not be called for action=end"))
+	defer restoreSubmit()
+
+	origSave := cqieSaveStudyProvider
+	var gotStart, gotStop int
+	cqieSaveStudyProvider = func(_ *cqieApi.CqieUserCache, _, _, _, _, _, _ string, startPos, stopPos int) (string, error) {
+		gotStart, gotStop = startPos, stopPos
+		return cqieFakeSave, nil
+	}
+	defer func() { cqieSaveStudyProvider = origSave }()
+
+	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","timeLength":300},"options":{"action":"end","startPos":300,"stopPos":300,"maxPos":300}}`
+	e := parseEnvelope(t, RunTask(cqieSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=end should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "done" {
+		t.Fatalf("expected done, got %q", res.Status)
+	}
+	if gotStart != 300 || gotStop != 300 {
+		t.Fatalf("final save positions=(%d,%d), want (300,300)", gotStart, gotStop)
+	}
+}
+
+func TestRunTaskCqie_ActionSubmitRestoresSessionCookie(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	origSubmit := cqieSubmitStudyProvider
+	var gotCookie string
+	cqieSubmitStudyProvider = func(cache *cqieApi.CqieUserCache, _, _, _, _, _, _, _ string, _, _, _ int) (string, error) {
+		gotCookie = cache.GetCookie()
+		return `{"msg":"操作成功"}`, nil
+	}
+	defer func() { cqieSubmitStudyProvider = origSubmit }()
+
+	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","studyId":"study-1"},"options":{"action":"submit","startPos":0,"stopPos":0,"maxPos":3}}`
+	sessionJSON := `{"platform":"cqie","token":"tok","cookies":"CAPTCHA=abc","extra":{"studentId":"st1","userId":"u1","orgId":"o1","deptId":"d1","orgMajorId":"m1"}}`
+	e := parseEnvelope(t, RunTask(sessionJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=submit should succeed: %s", e.Error)
+	}
+	if gotCookie != "CAPTCHA=abc" {
+		t.Fatalf("cookie=%q, want CAPTCHA=abc", gotCookie)
+	}
+}
+
+func TestRunTaskCqie_ActionGetProgressReadsServerCompletion(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	raw := `{"msg":"操作成功","data":[{"children":[{"courseCatalogVideoVos":[{"id":"v1","courseId":"c1","unitId":"u1","name":"视频1","timeLength":60,"haveTime":"00:01:00"}]}]}]}`
+	restore := fakeCqieDetail(raw, nil)
+	defer restore()
+
+	taskJSON := `{"platform":"cqie","id":"v1","raw":{"courseId":"c1","unitId":"u1","studentCourseId":"sc1","coursewareId":"cw1","version":"v1","timeLength":60},"options":{"action":"getProgress"}}`
+	e := parseEnvelope(t, RunTask(cqieSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=getProgress should succeed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Status != "done" || res.Raw["progress"] != float64(100) {
+		t.Fatalf("status/progress=(%q,%v), want (done,100)", res.Status, res.Raw["progress"])
 	}
 }
 

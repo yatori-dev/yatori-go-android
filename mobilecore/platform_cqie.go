@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,18 @@ var cqieSaveStudyProvider = func(cache *cqieApi.CqieUserCache, courseId, student
 	return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, 3, nil)
 }
 
+var cqieSaveSegmentProvider = func(cache *cqieApi.CqieUserCache, courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version string, startPos, stopPos int) (string, error) {
+	return cache.SaveSegmentStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version, startPos, stopPos, 3, nil)
+}
+
+var cqiePullVideoWorkProvider = func(cache *cqieApi.CqieUserCache, knowledgeNodeId, studentCourseId, unitId string) (string, error) {
+	return cache.PullVideoWorkPaperApi(knowledgeNodeId, studentCourseId, unitId)
+}
+
+var cqieSubmitWorkAnswerProvider = func(cache *cqieApi.CqieUserCache, answerJSON string) (string, error) {
+	return cache.SubmitWorkAnswerApi(answerJSON)
+}
+
 // cqieSubmitStudyProvider calls the position-window SubmitStudyTimeApi (updateStudyVideoPlan).
 // id is the studyId returned by GetVideoStudyIdApi. Replaceable for tests.
 var cqieSubmitStudyProvider = func(cache *cqieApi.CqieUserCache, id, version, courseId, studentCourseId, unitId, videoId, coursewareId string, startPos, stopPos, maxPos int) (string, error) {
@@ -50,6 +63,7 @@ var cqieSubmitStudyProvider = func(cache *cqieApi.CqieUserCache, id, version, co
 func cqieCache(sess SessionData) *cqieApi.CqieUserCache {
 	cache := &cqieApi.CqieUserCache{Account: sess.Account}
 	cache.SetAccess_Token(sess.Token)
+	cache.SetCookie(sess.Cookies)
 	cache.SetStudentId(strOf(sess.Extra["studentId"]))
 	cache.SetUserId(strOf(sess.Extra["userId"]))
 	cache.SetOrgId(strOf(sess.Extra["orgId"]))
@@ -145,6 +159,7 @@ func continueLoginCqie(task *PendingLoginTask, ocrText string) (ContinueLoginRes
 		Platform: "cqie",
 		Account:  task.Account,
 		Token:    loginResp.Data.AccessToken,
+		Cookies:  cookie,
 		Extra: map[string]interface{}{
 			"studentId":  userResp.Data.Id,
 			"userId":     userResp.Data.UserId,
@@ -176,6 +191,8 @@ func getCoursesCqie(sess SessionData) (CourseListResult, error) {
 				CoursewareId    string  `json:"coursewareId"`
 				Version         string  `json:"version"`
 				Learned         string  `json:"learned"`
+				SumTime         *string `json:"sumTime"`
+				HaveTime        *string `json:"haveTime"`
 				SumUnit         float64 `json:"sumUnit"`
 				HaveUnit        float64 `json:"haveUnit"`
 			} `json:"records"`
@@ -189,6 +206,9 @@ func getCoursesCqie(sess SessionData) (CourseListResult, error) {
 	}
 	items := make([]CourseItem, 0, len(resp.Data.Records))
 	for _, r := range resp.Data.Records {
+		if r.SumTime == nil || r.HaveTime == nil {
+			continue
+		}
 		items = append(items, CourseItem{
 			ID:   r.Id,
 			Name: r.Name,
@@ -300,16 +320,21 @@ func cqieVideosFromNode(node map[string]interface{}, courseId, studentCourseId, 
 		if t, ok := obj["timeLength"].(float64); ok {
 			timeLength = int(t)
 		}
+		studyTime := cqieClockSeconds(strOf(obj["haveTime"]))
 		progress := 0.0
-		if obj["haveTime"] != nil {
-			if ht, ok := obj["haveTime"].(string); ok && ht != "00:00:00" {
-				progress = 1 // non-zero study time means in-progress
+		if timeLength > 0 {
+			progress = float64(studyTime) * 100 / float64(timeLength)
+			if progress > 100 {
+				progress = 100
 			}
 		}
 		status := "not_started"
-		if progress > 0 {
+		if timeLength > 0 && studyTime >= timeLength {
+			status = "completed"
+		} else if studyTime > 0 {
 			status = "in_progress"
 		}
+		segments := cqieSegmentsFromVideo(obj, courseId, unitId)
 		tasks = append(tasks, TaskItem{
 			ID:       vid,
 			Name:     name,
@@ -324,10 +349,198 @@ func cqieVideosFromNode(node map[string]interface{}, courseId, studentCourseId, 
 				"coursewareId":    coursewareId,
 				"version":         version,
 				"timeLength":      timeLength,
+				"studyTime":       studyTime,
+				"maxCurrentPos":   studyTime,
+				"segments":        segments,
 			},
 		})
 	}
 	return tasks
+}
+
+func cqieClockSeconds(value string) int {
+	var hour, minute, second int
+	if _, err := fmt.Sscanf(value, "%d:%d:%d", &hour, &minute, &second); err != nil {
+		return 0
+	}
+	return hour*3600 + minute*60 + second
+}
+
+func cqieSegmentsFromVideo(video map[string]interface{}, fallbackCourseID, fallbackUnitID string) []map[string]interface{} {
+	segments := make([]map[string]interface{}, 0)
+	segmentGroups, _ := video["courseCatalogVideoSegments"].([]interface{})
+	for _, rawGroup := range segmentGroups {
+		group, ok := rawGroup.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		courseID := strOf(group["courseId"])
+		if courseID == "" {
+			courseID = fallbackCourseID
+		}
+		unitID := strOf(group["unitId"])
+		if unitID == "" {
+			unitID = fallbackUnitID
+		}
+		ranges, _ := group["videoSegmentKnowledgeTimeRangesVos"].([]interface{})
+		for _, rawRange := range ranges {
+			rangeObj, ok := rawRange.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			segments = append(segments, map[string]interface{}{
+				"id":              strOf(rangeObj["id"]),
+				"segmentId":       strOf(rangeObj["segmentId"]),
+				"knowledgeNodeId": strOf(rangeObj["knowledgeNodeId"]),
+				"courseId":        courseID,
+				"unitId":          unitID,
+				"segmentName":     strOf(group["segmentName"]),
+				"startTimeStr":    strOf(rangeObj["startTimeStr"]),
+				"endTimeStr":      strOf(rangeObj["endTimeStr"]),
+			})
+		}
+	}
+	return segments
+}
+
+func cqieSaveVideoPosition(
+	cache *cqieApi.CqieUserCache,
+	courseId, studentCourseId, unitId, videoId, coursewareId, version string,
+	segments interface{},
+	startPos, stopPos int,
+) (string, error) {
+	baseRaw, err := cqieSaveStudyProvider(cache, courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos)
+	if err != nil {
+		return "", err
+	}
+	var baseResp struct {
+		Msg  string `json:"msg"`
+		Data struct {
+			Id string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(baseRaw), &baseResp); err != nil {
+		return "", fmt.Errorf("parse save response: %w", err)
+	}
+	if baseResp.Msg != "操作成功" {
+		return "", fmt.Errorf("save study position failed: %s", baseRaw)
+	}
+
+	segmentList, _ := segments.([]interface{})
+	for _, rawSegment := range segmentList {
+		segment, ok := rawSegment.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		segmentID := strOf(segment["id"])
+		if segmentID == "" {
+			continue
+		}
+		segmentCourseID := strOf(segment["courseId"])
+		if segmentCourseID == "" {
+			segmentCourseID = courseId
+		}
+		segmentUnitID := strOf(segment["unitId"])
+		if segmentUnitID == "" {
+			segmentUnitID = unitId
+		}
+		segmentRaw, err := cqieSaveSegmentProvider(
+			cache, segmentCourseID, studentCourseId, segmentUnitID, videoId, coursewareId,
+			segmentID, strconv.Itoa(stopPos), version, startPos, stopPos,
+		)
+		if err != nil {
+			return "", err
+		}
+		if !strings.Contains(segmentRaw, "操作成功") {
+			return "", fmt.Errorf("save segment position failed: %s", segmentRaw)
+		}
+		knowledgeNodeID := strOf(segment["knowledgeNodeId"])
+		if knowledgeNodeID != "" {
+			if err := cqieAnswerEmbeddedWork(cache, segmentID, knowledgeNodeID, studentCourseId, segmentCourseID, segmentUnitID, videoId, version); err != nil {
+				return "", err
+			}
+		}
+	}
+	return baseResp.Data.Id, nil
+}
+
+func cqieAnswerEmbeddedWork(
+	cache *cqieApi.CqieUserCache,
+	segmentID, knowledgeNodeID, studentCourseId, courseId, unitId, videoId, version string,
+) error {
+	paperRaw, err := cqiePullVideoWorkProvider(cache, segmentID, studentCourseId, unitId)
+	if err != nil {
+		return err
+	}
+	var paper struct {
+		Code int `json:"code"`
+		Data []struct {
+			Id              string `json:"id"`
+			QuestionType    int    `json:"questionType"`
+			ReferenceAnswer string `json:"referenceAnswer"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(paperRaw), &paper); err != nil {
+		return fmt.Errorf("parse embedded work: %w", err)
+	}
+	if paper.Code != 0 && paper.Code != 200 {
+		return fmt.Errorf("pull embedded work failed: %s", paperRaw)
+	}
+	if len(paper.Data) == 0 {
+		return nil
+	}
+	type answerItem struct {
+		SubmitAnswer       string `json:"submitAnswer"`
+		ExercisesId        string `json:"exercisesId"`
+		QuestionType       int    `json:"questionType"`
+		ReferenceAnswer    string `json:"referenceAnswer"`
+		RecordId           string `json:"recordId"`
+		SegmentKnowledgeId string `json:"segmentKnowledgeId"`
+		UpdateCount        int    `json:"updateCount"`
+	}
+	type answerPayload struct {
+		PoList             []answerItem `json:"poList"`
+		StudentCourseId    string       `json:"studentCourseId"`
+		UnitId             string       `json:"unitId"`
+		CourseId           string       `json:"courseId"`
+		SegmentKnowledgeId string       `json:"segmentKnowledgeId"`
+		StudentId          string       `json:"studentId"`
+		VideoId            string       `json:"videoId"`
+		DeptId             string       `json:"deptId"`
+		MajorId            string       `json:"majorId"`
+		Version            string       `json:"version"`
+		OrgId              string       `json:"orgId"`
+	}
+	payload := answerPayload{
+		StudentCourseId: studentCourseId, UnitId: unitId, CourseId: courseId,
+		SegmentKnowledgeId: segmentID, StudentId: cache.GetStudentId(), VideoId: videoId,
+		DeptId: cache.GetDeptId(), MajorId: cache.GetOrgMajorId(), Version: version, OrgId: cache.GetOrgId(),
+	}
+	for _, question := range paper.Data {
+		payload.PoList = append(payload.PoList, answerItem{
+			SubmitAnswer: question.ReferenceAnswer, ExercisesId: question.Id,
+			QuestionType: question.QuestionType, ReferenceAnswer: question.ReferenceAnswer,
+			SegmentKnowledgeId: knowledgeNodeID,
+		})
+	}
+	answerJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	answerRaw, err := cqieSubmitWorkAnswerProvider(cache, string(answerJSON))
+	if err != nil {
+		return err
+	}
+	var answerResp struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(answerRaw), &answerResp); err != nil {
+		return fmt.Errorf("parse embedded work submit: %w", err)
+	}
+	if answerResp.Code != 0 && answerResp.Code != 200 {
+		return fmt.Errorf("submit embedded work failed: %s", answerRaw)
+	}
+	return nil
 }
 
 // --- RunTask ---
@@ -373,8 +586,34 @@ func runTaskCqie(sess SessionData, input TaskInput) (RunTaskResult, error) {
 
 	cache := cqieCache(sess)
 
+	if action == "getProgress" {
+		progressRaw, err := cqieDetailProvider(cache, courseId, studentCourseId, version)
+		if err != nil {
+			return RunTaskResult{}, fmt.Errorf("cqie: get progress failed: %w", err)
+		}
+		if !strings.Contains(progressRaw, "操作成功") {
+			return RunTaskResult{}, fmt.Errorf("cqie: get progress failed: %s", progressRaw)
+		}
+		for _, task := range cqieExtractVideos(progressRaw, courseId, studentCourseId, coursewareId, version) {
+			if task.ID != videoId {
+				continue
+			}
+			status := "incomplete"
+			if task.Progress >= 100 || task.Status == "completed" {
+				status = "done"
+			}
+			return RunTaskResult{Platform: "cqie", TaskID: videoId, Status: status,
+				Message: fmt.Sprintf("server progress=%.2f", task.Progress),
+				Raw: map[string]interface{}{
+					"progress": task.Progress, "studyTime": task.Raw["studyTime"],
+					"timeLength": task.Raw["timeLength"],
+				}}, nil
+		}
+		return RunTaskResult{}, fmt.Errorf("cqie: video %s missing from progress response", videoId)
+	}
+
 	// submit-only path: host already holds a studyId from a prior "start".
-	if action == "submit" || action == "continue" || action == "end" {
+	if action == "submit" || action == "continue" {
 		studyID := strOf(input.Raw["studyId"])
 		if studyID == "" {
 			return RunTaskResult{}, fmt.Errorf("cqie: action=%s requires raw.studyId from a prior action=start", action)
@@ -392,6 +631,49 @@ func runTaskCqie(sess SessionData, input TaskInput) (RunTaskResult, error) {
 		return RunTaskResult{Platform: "cqie", TaskID: videoId, Status: "submitted",
 			Message: fmt.Sprintf("startPos=%d stopPos=%d maxPos=%d", startPos, stopPos, maxPos),
 			Raw:     map[string]interface{}{"studyId": studyID, "startPos": startPos, "stopPos": stopPos, "maxPos": maxPos}}, nil
+	}
+
+	// Console finalises both normal and fast modes with saveStudyVideoPlan.
+	if action == "end" {
+		startPos := optInt(input.Options["startPos"], timeLength)
+		stopPos := optInt(input.Options["stopPos"], startPos)
+		if _, err := cqieSaveVideoPosition(
+			cache, courseId, studentCourseId, unitId, videoId, coursewareId, version,
+			input.Raw["segments"], startPos, stopPos,
+		); err != nil {
+			return RunTaskResult{}, fmt.Errorf("cqie: final save failed: %w", err)
+		}
+		return RunTaskResult{Platform: "cqie", TaskID: videoId, Status: "done",
+			Message: fmt.Sprintf("saved startPos=%d stopPos=%d", startPos, stopPos),
+			Raw: map[string]interface{}{
+				"startPos": startPos, "stopPos": stopPos,
+				"maxPos": optInt(input.Options["maxPos"], stopPos),
+			}}, nil
+	}
+
+	// Console starts a video by saving the current position. data.id is the study id
+	// required by updateStudyVideoPlan.
+	if action == "start" {
+		studyTime := optInt(input.Raw["studyTime"], 0)
+		studyID, err := cqieSaveVideoPosition(
+			cache, courseId, studentCourseId, unitId, videoId, coursewareId, version,
+			input.Raw["segments"], studyTime, studyTime,
+		)
+		if err != nil {
+			return RunTaskResult{}, fmt.Errorf("cqie: start save failed: %w", err)
+		}
+		if studyID == "" {
+			return RunTaskResult{}, fmt.Errorf("cqie: start save failed: response missing data.id")
+		}
+		return RunTaskResult{Platform: "cqie", TaskID: videoId, Status: "started",
+			Message: fmt.Sprintf("studyId=%s maxCurrentPos=%d", studyID, studyTime),
+			Raw: map[string]interface{}{
+				"studyId": studyID, "coursewareId": coursewareId,
+				"maxCurrentPos": studyTime, "courseId": courseId,
+				"studentCourseId": studentCourseId, "unitId": unitId,
+				"videoId": videoId, "version": version, "timeLength": timeLength,
+				"segments": input.Raw["segments"],
+			}}, nil
 	}
 
 	// Step 1: GetVideoStudyIdApi registers the study session and yields studyId/coursewareId/maxCurrentPos.

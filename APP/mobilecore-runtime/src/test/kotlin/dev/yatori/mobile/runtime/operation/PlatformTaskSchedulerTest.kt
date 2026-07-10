@@ -116,6 +116,128 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `cqie mode zero skips learning without calling core`() = runTest {
+        val result = taskScheduler.runTask(
+            SessionData("cqie", "stu"),
+            TaskItem("video1", type = "video", platform = "cqie"),
+            PlatformTaskRunOptions(videoModel = 0),
+        )
+
+        assertEquals("skipped", result.status)
+        assertEquals(emptyList(), gateway.options)
+    }
+
+    @Test
+    fun `cqie normal mode mirrors console position windows and final save`() = runTest {
+        val session = SessionData("cqie", "stu")
+        val task = TaskItem("video1", type = "video", platform = "cqie", raw = JsonObject().apply {
+            addProperty("timeLength", 6)
+            addProperty("studyTime", 0)
+        })
+        listOf(
+            cqieResult("started", studyId = "study-1", position = 0),
+            cqieResult("submitted", studyId = "study-1", position = 3),
+            cqieResult("submitted", studyId = "study-1", position = 6),
+            cqieResult("done", position = 6),
+            cqieVerified(100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 1))
+
+        assertEquals("done", result.status)
+        assertEquals(listOf("start", "submit", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
+        assertEquals(0, gateway.options[1]["startPos"])
+        assertEquals(0, gateway.options[1]["stopPos"])
+        assertEquals(3, gateway.options[1]["maxPos"])
+        assertEquals(3, gateway.options[2]["startPos"])
+        assertEquals(3, gateway.options[2]["stopPos"])
+        assertEquals(6, gateway.options[2]["maxPos"])
+        assertEquals(6, gateway.options[3]["startPos"])
+        assertEquals(6, gateway.options[3]["stopPos"])
+    }
+
+    @Test
+    fun `cqie fast mode mirrors console save submit save sequence`() = runTest {
+        val session = SessionData("cqie", "stu")
+        val task = TaskItem("video1", type = "video", platform = "cqie", raw = JsonObject().apply {
+            addProperty("timeLength", 300)
+            addProperty("studyTime", 12)
+        })
+        listOf(
+            cqieResult("started", studyId = "study-1", position = 12),
+            cqieResult("submitted", studyId = "study-1", position = 12),
+            cqieResult("done", position = 12),
+            cqieVerified(100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 2))
+
+        assertEquals("done", result.status)
+        assertEquals(listOf("start", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
+        assertEquals(12, gateway.options[1]["startPos"])
+        assertEquals(12, gateway.options[1]["stopPos"])
+        assertEquals(12, gateway.options[1]["maxPos"])
+        assertEquals(12, gateway.options[2]["startPos"])
+        assertEquals(12, gateway.options[2]["stopPos"])
+    }
+
+    @Test
+    fun `cqie normal mode is not truncated by generic max tick limit`() = runTest {
+        val session = SessionData("cqie", "stu")
+        val task = TaskItem("video1", type = "video", platform = "cqie", raw = JsonObject().apply {
+            addProperty("timeLength", 9)
+            addProperty("studyTime", 0)
+        })
+        listOf(
+            cqieResult("started", studyId = "study-1", position = 0),
+            cqieResult("submitted", studyId = "study-1", position = 3),
+            cqieResult("submitted", studyId = "study-1", position = 6),
+            cqieResult("submitted", studyId = "study-1", position = 9),
+            cqieResult("done", position = 9),
+            cqieVerified(100),
+        ).forEach(gateway.results::add)
+
+        val result = taskScheduler.runTask(
+            session,
+            task,
+            PlatformTaskRunOptions(videoModel = 1, maxTicksPerTask = 1),
+        )
+
+        assertEquals("done", result.status)
+        assertEquals(listOf("start", "submit", "submit", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
+    }
+
+    @Test
+    fun `cqie completion requires server progress verification`() = runTest {
+        val session = SessionData("cqie", "stu")
+        val task = TaskItem("video1", type = "video", platform = "cqie", raw = JsonObject().apply {
+            addProperty("timeLength", 3)
+            addProperty("studyTime", 0)
+        })
+        listOf(
+            cqieResult("started", studyId = "study-1", position = 0),
+            cqieResult("submitted", studyId = "study-1", position = 3),
+            cqieResult("done", position = 3),
+            RunTaskResult("cqie", "video1", "incomplete", raw = JsonObject().apply { addProperty("progress", 80) }),
+        ).forEach(gateway.results::add)
+
+        assertFailsWith<IllegalStateException> {
+            taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 1))
+        }
+        assertEquals(listOf("start", "submit", "end", "getProgress"), gateway.options.map { it["action"] })
+    }
+
+    private fun cqieResult(status: String, studyId: String? = null, position: Int): RunTaskResult =
+        RunTaskResult("cqie", "video1", status, raw = JsonObject().apply {
+            studyId?.let { addProperty("studyId", it) }
+            addProperty("maxCurrentPos", position)
+            addProperty("maxPos", position)
+        })
+
+    private fun cqieVerified(progress: Int): RunTaskResult =
+        RunTaskResult("cqie", "video1", "done", raw = JsonObject().apply { addProperty("progress", progress) })
+
+    @Test
     fun `enaea fast mode uses console study time sixty`() = runTest {
         gateway.results.add(RunTaskResult("enaea", "video1", "done", raw = JsonObject().apply {
             addProperty("progress", 100)

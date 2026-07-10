@@ -12,6 +12,14 @@ import (
 	"github.com/yatori-dev/yatori-go-mobile-core/utils"
 )
 
+var cqieCourseHTTPClientFactory = func() *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // CQIE currently requires the legacy client behavior.
+		},
+	}}
+}
+
 // UserDetailsApi 获取用户信息
 func (cache *CqieUserCache) UserDetailsApi(retry int, lastErr error) (string, error) {
 	if retry < 0 {
@@ -136,20 +144,12 @@ func (cache *CqieUserCache) PullCourseListApiNew(retry int, lastErr error) (stri
    "pageSize": 200
  }`)
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := cqieCourseHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, payload)
 
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.PullCourseListApi(retry-1, err)
+		return cache.PullCourseListApiNew(retry-1, err)
 	}
 	req.Header.Add("Authorization", cache.access_token)
 	req.Header.Add("User-Agent", "Apifox/1.0.0 (https://apifox.com)")
@@ -161,14 +161,14 @@ func (cache *CqieUserCache) PullCourseListApiNew(retry int, lastErr error) (stri
 	res, err := client.Do(req)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.PullCourseListApi(retry-1, err)
+		return cache.PullCourseListApiNew(retry-1, err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.PullCourseListApi(retry-1, err)
+		return cache.PullCourseListApiNew(retry-1, err)
 	}
 	return string(body), nil
 }
@@ -254,20 +254,12 @@ func (cache *CqieUserCache) SubmitStudyTimeApi(
 	   "coursewareId": "` + coursewareId + `",
        "segmentKnowledgeId": null
 	 }`)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := cqieCourseHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, payload)
 
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, coursewareId, startPos, stopPos, maxPos, retry-1, err)
 	}
 	req.Header.Add("Authorization", cache.GetAccess_Token())
 	req.Header.Add("Cookie", cache.GetCookie())
@@ -277,14 +269,14 @@ func (cache *CqieUserCache) SubmitStudyTimeApi(
 	res, err := client.Do(req)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, coursewareId, startPos, stopPos, maxPos, retry-1, err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, courseId, startPos, stopPos, maxPos, retry-1, err)
+		return cache.SubmitStudyTimeApi(id, version, courseId, studentCourseId, unitId, videoId, studyTime, coursewareId, startPos, stopPos, maxPos, retry-1, err)
 	}
 	return string(body), nil
 }
@@ -370,20 +362,12 @@ func (cache *CqieUserCache) SaveSegmentStudyTimeApi(courseId, studentCourseId, u
 	"version": "` + version + `"
 }`)
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := cqieCourseHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, payload)
 
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+		return cache.SaveSegmentStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version, startPos, stopPos, retry-1, err)
 	}
 	req.Header.Add("Authorization", cache.access_token)
 	req.Header.Add("User-Agent", utils.DefaultUserAgent)
@@ -392,14 +376,14 @@ func (cache *CqieUserCache) SaveSegmentStudyTimeApi(courseId, studentCourseId, u
 	res, err := client.Do(req)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+		return cache.SaveSegmentStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version, startPos, stopPos, retry-1, err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		time.Sleep(time.Millisecond * 150)
-		return cache.SaveStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, version, startPos, stopPos, retry-1, err)
+		return cache.SaveSegmentStudyTimeApi(courseId, studentCourseId, unitId, videoId, coursewareId, segmentKnowledgeId, maxCurrentPos, version, startPos, stopPos, retry-1, err)
 	}
 	return string(body), nil
 }

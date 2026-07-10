@@ -215,13 +215,44 @@ class PlatformActionScheduler(
     ): RunTaskResult {
         val state = requireState(session.platform, session.account, taskId, "cqie-progress")
         val options = state.raw.toKotlinMap() + mapOf(
-            "action" to if (input.finish) "end" else "submit",
+            "action" to "submit",
             "startPos" to input.startPos,
             "stopPos" to input.stopPos,
             "maxPos" to input.maxPos,
         )
         val result = repository.runTask(session, state.task, options)
         saveState(session, state.task, "cqie-progress", result, progress = input.maxPos.toDouble(), intervalSeconds = 3)
+        return result
+    }
+
+    suspend fun finishCqieProgress(
+        session: SessionData,
+        taskId: String,
+        position: Int,
+    ): RunTaskResult {
+        val state = requireState(session.platform, session.account, taskId, "cqie-progress")
+        val options = state.raw.toKotlinMap() + mapOf(
+            "action" to "end",
+            "startPos" to position,
+            "stopPos" to position,
+            "maxPos" to position,
+        )
+        val result = repository.runTask(session, state.task, options)
+        saveState(session, state.task, "cqie-progress", result, progress = position.toDouble(), intervalSeconds = 3)
+        return result
+    }
+
+    suspend fun getCqieProgress(session: SessionData, taskId: String): RunTaskResult {
+        val state = requireState(session.platform, session.account, taskId, "cqie-progress")
+        val result = repository.runTask(session, state.task, state.raw.toKotlinMap() + mapOf("action" to "getProgress"))
+        saveState(
+            session,
+            state.task,
+            "cqie-progress",
+            result,
+            progress = jsonDouble(result.raw, "progress"),
+            intervalSeconds = 3,
+        )
         return result
     }
 

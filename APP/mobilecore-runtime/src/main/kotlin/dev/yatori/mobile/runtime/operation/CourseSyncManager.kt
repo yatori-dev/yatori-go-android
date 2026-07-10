@@ -243,7 +243,7 @@ class CourseSyncManager(
                         .onFailure { e ->
                             if (e.isSessionExpiredError()) throw e
                             emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
-                            if (session.platform == "enaea") throw e
+                            if (session.platform == "enaea" || session.platform == "cqie") throw e
                         }
                     controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
                 }

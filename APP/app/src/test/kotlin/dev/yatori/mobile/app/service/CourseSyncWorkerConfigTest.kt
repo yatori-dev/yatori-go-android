@@ -125,6 +125,14 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `cqie video mode preserves off normal and fast values`() {
+        assertEquals(0, cqieVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
+        assertEquals(1, cqieVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
+        assertEquals(2, cqieVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 2) }))
+        assertEquals(1, cqieVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 9) }))
+    }
+
+    @Test
     fun `enaea saved course paths use project category matching`() {
         val rule = courseSelectionRuleFromCoursesCustom(
             "enaea",

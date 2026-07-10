@@ -234,34 +234,47 @@ class PlatformTaskScheduler(
         shouldCancel: () -> Boolean,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
+        if (options.videoModel == 0) {
+            return RunTaskResult(session.platform, task.id, "skipped", "video learning disabled")
+        }
         val started = actions.startCqieProgress(session, task)
         val start = max(0, started.progress.toInt())
-
-        // Mode 2 (秒刷): one-shot submit at current position then end — mirrors console videoActionSecondBrush.
-        if (options.videoModel == 2) {
-            val result = actions.tickCqieProgress(session, task.id, CqieTickInput(startPos = start, stopPos = start, maxPos = start, finish = true))
-            onEvent(tickEvent(session.platform, task, 1, 1, 100))
-            return result
+        suspend fun finishAndVerify(position: Int): RunTaskResult {
+            actions.finishCqieProgress(session, task.id, position)
+            val verified = actions.getCqieProgress(session, task.id)
+            val progress = jsonDouble(verified.raw, "progress")
+            if (!verified.status.equals("done", ignoreCase = true) || progress < 100.0) {
+                error("cqie: server progress remained below 100 after final save (status=${verified.status}, progress=$progress)")
+            }
+            return verified
         }
 
-        // Mode 1: 3 s position-window loop.
+        // Mode 2 (秒刷): Console performs Save(current) -> Submit(current) -> Save(current).
+        if (options.videoModel == 2) {
+            actions.tickCqieProgress(session, task.id, CqieTickInput(startPos = start, stopPos = start, maxPos = start))
+            onEvent(tickEvent(session.platform, task, 1, 1, 100))
+            return finishAndVerify(start)
+        }
+
+        // Mode 1: Console submits [current,current,current+3], waits three seconds, then saves at duration.
         val total = durationSeconds(started.task.raw, "timeLength", "duration", "videoLength").takeIf { it > 0 } ?: 3
-        val ticks = min(options.maxTicksPerTask, max(1, ceil((total - start).coerceAtLeast(0) / 3.0).toInt()))
+        val ticks = ceil((total - start).coerceAtLeast(0) / 3.0).toInt()
         var last = RunTaskResult(session.platform, task.id, "started")
         var pos = start
         for (i in 1..ticks) {
             if (shouldCancel()) return last
-            sleepBeforeTick(i, 3)
             val next = min(total, pos + 3)
             last = actions.tickCqieProgress(
                 session,
                 task.id,
-                CqieTickInput(startPos = pos, stopPos = next, maxPos = next, finish = next >= total),
+                CqieTickInput(startPos = pos, stopPos = pos, maxPos = next),
             )
             pos = next
             onEvent(tickEvent(session.platform, task, i, ticks, percent(i, ticks)))
+            sleepMillis(3_000L)
         }
-        return last
+        if (shouldCancel()) return last
+        return finishAndVerify(total)
     }
 
     private suspend fun runQingshuxuetang(

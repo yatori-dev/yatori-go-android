@@ -394,8 +394,11 @@ internal fun cqieVideoModelFromSavedConfig(container: AppContainer, platform: St
         it.str("account").equals(account, ignoreCase = false) &&
             it.str("accountType").equals(platform, ignoreCase = true)
     } ?: return 1
-    return user.obj("coursesCustom").int("videoModel", 1).takeIf { it in 1..2 } ?: 1
+    return cqieVideoModelFromCoursesCustom(user.obj("coursesCustom"))
 }
+
+internal fun cqieVideoModelFromCoursesCustom(cc: JsonObject): Int =
+    cc.int("videoModel", 1).takeIf { it in 0..2 } ?: 1
 
 internal fun xuexitongOptionsFromCoursesCustom(cc: JsonObject): XuexitongRunOptions =
     XuexitongRunOptions(

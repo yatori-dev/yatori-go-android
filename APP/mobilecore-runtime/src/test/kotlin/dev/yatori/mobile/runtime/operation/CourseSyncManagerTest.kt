@@ -245,6 +245,36 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun cqieTaskFailureFailsTheBatchInsteadOfMarkingDone() = runTest {
+        val cqieSession = SessionData("cqie", "stu")
+        val cqieCourse = CourseItem("c1", name = "CQIE课程", platform = "cqie")
+        val cqieTask = TaskItem("v1", name = "视频", type = "video", platform = "cqie")
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) = listOf(cqieCourse)
+            override suspend fun getTasks(session: SessionData, course: CourseItem) = listOf(cqieTask)
+            override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>) =
+                error("generic runner must not handle CQIE")
+        }
+        val failingPlatform = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = true
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult = error("cqie verification failed")
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), failingPlatform)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(cqieSession, RunPlan("cqie-failure", "cqie", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("CQIE", ignoreCase = true))
+    }
+
+    @Test
     fun yinghuaSkipsCoursesThatHaveNotStarted() = runTest {
         var getTasksCalls = 0
         val futureCourse = CourseItem(
