@@ -253,6 +253,7 @@ fun CourseRuleEditorScreen(container: AppContainer, nav: Navigator, platform: St
             // Course multi-select — only shown when a filter mode is active
             if (courseMode != COURSE_MODE_ALL) {
                 CourseSelectionCard(
+                    platform = platform,
                     cachedCourses = cachedCourses,
                     selectedCourses = selectedCourses,
                     expanded = courseListExpanded,
@@ -314,8 +315,20 @@ fun CourseRuleEditorScreen(container: AppContainer, nav: Navigator, platform: St
     }
 }
 
+internal fun courseSelectionValues(platform: String, courses: List<CourseItem>): List<String> =
+    courses.mapNotNull { course ->
+        if (platform != "enaea") return@mapNotNull course.name.takeIf(String::isNotBlank)
+        val project = runCatching { course.raw.get("projectName")?.asString.orEmpty() }.getOrDefault("").trim()
+        val category = runCatching { course.raw.get("titleTag")?.asString.orEmpty() }.getOrDefault("").trim()
+        when {
+            project.isBlank() -> course.name.takeIf(String::isNotBlank)
+            category.isBlank() -> project
+            else -> "$project-->$category"
+        }
+    }.distinct()
+
 /**
- * Expandable multi-select card for picking course names from the cached list.
+ * Expandable multi-select card for picking course filters from the cached list.
  *
  * - No cached courses → shows hint text only (no expand button)
  * - Courses available, none selected → "点击选择课程" + expand button
@@ -324,12 +337,14 @@ fun CourseRuleEditorScreen(container: AppContainer, nav: Navigator, platform: St
  */
 @Composable
 private fun CourseSelectionCard(
+    platform: String,
     cachedCourses: List<CourseItem>,
     selectedCourses: Set<String>,
     expanded: Boolean,
     onExpandToggle: () -> Unit,
     onToggleCourse: (String) -> Unit,
 ) {
+    val selectionValues = courseSelectionValues(platform, cachedCourses)
     Card(insideMargin = PaddingValues(0.dp)) {
         Column {
             // Header row: hint / selection summary + expand toggle
@@ -342,7 +357,7 @@ private fun CourseSelectionCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    if (cachedCourses.isEmpty()) {
+                    if (selectionValues.isEmpty()) {
                         Text(
                             "没有课程信息",
                             style = MiuixTheme.textStyles.body2,
@@ -367,7 +382,7 @@ private fun CourseSelectionCard(
                         )
                     }
                 }
-                if (cachedCourses.isNotEmpty()) {
+                if (selectionValues.isNotEmpty()) {
                     Icon(
                         imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                         contentDescription = if (expanded) "收起" else "展开",
@@ -377,7 +392,7 @@ private fun CourseSelectionCard(
             }
 
             // Expandable course checklist
-            AnimatedVisibility(visible = expanded && cachedCourses.isNotEmpty()) {
+            AnimatedVisibility(visible = expanded && selectionValues.isNotEmpty()) {
                 Column {
                     // Thin divider
                     Box(
@@ -387,18 +402,18 @@ private fun CourseSelectionCard(
                             .padding(horizontal = 16.dp),
                     )
                     Spacer(Modifier.height(4.dp))
-                    cachedCourses.forEach { course ->
-                        val checked = course.name in selectedCourses
+                    selectionValues.forEach { value ->
+                        val checked = value in selectedCourses
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onToggleCourse(course.name) }
+                                .clickable { onToggleCourse(value) }
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                text = course.name,
+                                text = value,
                                 modifier = Modifier.weight(1f).padding(end = 12.dp),
                                 color = MiuixTheme.colorScheme.onSurface,
                             )

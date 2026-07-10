@@ -355,6 +355,69 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `enaea project category rule filters using raw hierarchy`() = runTest {
+        fun enaeaCourse(id: String, project: String, category: String) = CourseItem(
+            id = id,
+            name = "相同课程标题",
+            platform = "enaea",
+            raw = JsonObject().apply {
+                addProperty("projectName", project)
+                addProperty("titleTag", category)
+            },
+        )
+        val runner = FakeRunner(
+            courses = listOf(
+                enaeaCourse("c1", "项目A", "必修"),
+                enaeaCourse("c2", "项目B", "必修"),
+                enaeaCourse("c3", "项目A", "选修"),
+            ),
+            tasksByCourse = mapOf(
+                "c1" to listOf(task("t1")),
+                "c2" to listOf(task("t2")),
+                "c3" to listOf(task("t3")),
+            ),
+        )
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+        val rule = CourseSelectionRule(
+            CourseSelectionRule.Mode.ENAEA_PROJECT_CATEGORY,
+            includeKeywords = listOf("项目A-->必修"),
+        )
+
+        val submitted = mgr.run(
+            SessionData("enaea", "stu"),
+            RunPlan("enaea-filter", "enaea", "stu", rule = rule),
+        )
+
+        assertEquals(listOf("t1"), submitted)
+    }
+
+    @Test
+    fun `enaea task failure fails the batch instead of reporting completion`() = runTest {
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) =
+                listOf(CourseItem("c1", name = "课程", platform = "enaea"))
+
+            override suspend fun getTasks(session: SessionData, course: CourseItem) =
+                listOf(TaskItem("t1", name = "视频", type = "video", platform = "enaea"))
+
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: Map<String, Any>,
+            ): RunTaskResult = throw IllegalStateException("network down")
+        }
+        val controller = OperationController(now = { 0L })
+        val mgr = CourseSyncManager(runner, controller)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(SessionData("enaea", "stu"), RunPlan("enaea-error", "enaea", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("network down"))
+        assertEquals(OperationStatus.FAILED, controller.operations.value.single().status)
+    }
+
+    @Test
     fun `completedTaskIds are not resubmitted on resume`() = runTest {
         val runner = FakeRunner(
             courses = listOf(course("c1", "math")),

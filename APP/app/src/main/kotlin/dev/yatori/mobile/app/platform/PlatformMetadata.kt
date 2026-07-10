@@ -21,8 +21,8 @@ val allPlatformMeta: List<PlatformMeta> = listOf(
     PlatformMeta(Platform.CQIE,            "重庆工程学院", requiresUrl = false),
     PlatformMeta(Platform.QINGSHUXUETANG,  "青书学堂",   requiresUrl = false),
     PlatformMeta(Platform.KETANGX,         "码上研训",   requiresUrl = false),
-    PlatformMeta(Platform.TTCDW,           "学习公社",   requiresUrl = false),
-    PlatformMeta(Platform.ENAEA,           "网络党校",   requiresUrl = false),
+    PlatformMeta(Platform.TTCDW,           "学习公社（TTCDW）", requiresUrl = false),
+    PlatformMeta(Platform.ENAEA,           "学习公社 / 网络党校（ENAEA）", requiresUrl = false),
     PlatformMeta(Platform.WELEARN,         "随行课堂",   requiresUrl = false),
     PlatformMeta(
         platform      = Platform.ICVE,

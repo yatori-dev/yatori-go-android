@@ -113,6 +113,7 @@ class CourseSyncManager(
 
     /** Haiqikeji learning modes operate on video nodes; work/exam stay opt-in answer tasks. */
     private fun shouldRunFlatTask(session: SessionData, task: TaskItem, plan: RunPlan): Boolean {
+        if (session.platform == "enaea") return plan.enaeaVideoModel != 0
         if (session.platform != "haiqikeji") return true
         if (task.type.equals("video", ignoreCase = true)) return plan.haiqikejiVideoModel != 0
         if (!plan.answerPolicy.enabled) return false
@@ -143,7 +144,14 @@ class CourseSyncManager(
         )
         val submitted = ArrayList<String>()
         try {
-            val selectedCourses = runner.getCourses(session).filter { plan.rule.matches(it.id, it.name) }
+            val selectedCourses = runner.getCourses(session).filter { course ->
+                plan.rule.matches(
+                    course.id,
+                    course.name,
+                    runCatching { course.raw.get("projectName")?.asString.orEmpty() }.getOrDefault(""),
+                    runCatching { course.raw.get("titleTag")?.asString.orEmpty() }.getOrDefault(""),
+                )
+            }
             val courses = when (session.platform) {
                 "yinghua" -> selectedCourses.filter { course ->
                     val notStarted = course.isYinghuaCourseNotStarted()
@@ -235,6 +243,7 @@ class CourseSyncManager(
                         .onFailure { e ->
                             if (e.isSessionExpiredError()) throw e
                             emit(SyncEvent("error", "${p.course.name}／${p.task.name} 失败：${e.message}", plan.platform))
+                            if (session.platform == "enaea") throw e
                         }
                     controller.updateProgress(opId, completed = index + 1, detail = p.task.name.ifBlank { p.task.id })
                 }
@@ -918,6 +927,7 @@ class CourseSyncManager(
                     dryRun = plan.dryRun,
                     videoModel = when (session.platform) {
                         "haiqikeji" -> plan.haiqikejiVideoModel
+                        "enaea"     -> plan.enaeaVideoModel
                         "yinghua"   -> plan.yinghuaVideoModel
                         "welearn"   -> plan.welearnVideoModel
                         "cqie"      -> plan.cqieVideoModel

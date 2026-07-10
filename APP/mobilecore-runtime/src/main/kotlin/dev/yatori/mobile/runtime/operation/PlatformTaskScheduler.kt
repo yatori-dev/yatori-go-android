@@ -202,16 +202,29 @@ class PlatformTaskScheduler(
         shouldCancel: () -> Boolean,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
+        if (options.videoModel == 0) {
+            return RunTaskResult(session.platform, task.id, "skipped", "video learning disabled")
+        }
+        val input = if (options.videoModel == 2) {
+            EnaeaTickInput(studyTime = 60, fast = true)
+        } else {
+            EnaeaTickInput()
+        }
         var last = RunTaskResult(session.platform, task.id, "started")
         for (i in 1..options.maxTicksPerTask) {
             if (shouldCancel()) return last
             sleepBeforeTick(i, 25)
-            last = actions.tickEnaeaProgress(session, task)
+            last = actions.tickEnaeaProgress(session, task, input)
             val progress = jsonDouble(last.raw, "progress")
             onEvent(tickEvent(session.platform, task, i, options.maxTicksPerTask, progress.toInt()))
             if (progress >= 100.0) break
         }
-        return last
+        val finalProgress = jsonDouble(last.raw, "progress")
+        return if (finalProgress >= 100.0) {
+            last
+        } else {
+            last.copy(status = "incomplete", message = "progress below 100 after tick cap")
+        }
     }
 
     private suspend fun runCqie(

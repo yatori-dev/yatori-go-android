@@ -25,6 +25,7 @@ type EnaeaProject struct {
 	CircleCardNumber string    //卡片数字编号
 }
 type EnaeaCourse struct {
+	ProjectName        string  //所属项目名称；移动端用于项目-->分类筛选
 	TitleTag           string  //课程对应侧边栏标签
 	CourseTitle        string  //课程名称
 	Remark             string  //课程节点名称

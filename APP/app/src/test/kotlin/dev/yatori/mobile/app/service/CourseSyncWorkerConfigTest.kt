@@ -117,6 +117,37 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `enaea video mode preserves off normal and fast values`() {
+        assertEquals(0, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
+        assertEquals(1, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
+        assertEquals(2, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 2) }))
+        assertEquals(1, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 9) }))
+    }
+
+    @Test
+    fun `enaea saved course paths use project category matching`() {
+        val rule = courseSelectionRuleFromCoursesCustom(
+            "enaea",
+            JsonObject().apply {
+                add("includeCourses", com.google.gson.JsonArray().apply { add("项目A-->必修") })
+            },
+        )
+
+        assertEquals(CourseSelectionRule.Mode.ENAEA_PROJECT_CATEGORY, rule.mode)
+        assertTrue(rule.matches("c1", "课程标题", "项目A", "必修"))
+        assertFalse(rule.matches("c2", "课程标题", "项目B", "必修"))
+        assertFalse(rule.matches("c3", "课程标题", "项目A", "选修"))
+
+        val legacyRule = courseSelectionRuleFromCoursesCustom(
+            "enaea",
+            JsonObject().apply {
+                add("includeCourses", com.google.gson.JsonArray().apply { add("旧版APP课程名") })
+            },
+        )
+        assertTrue(legacyRule.matches("c4", "旧版APP课程名", "项目B", "选修"))
+    }
+
+    @Test
     fun `haiqikeji saved course lists use exact name matching`() {
         val rule = courseSelectionRuleFromCoursesCustom(
             "haiqikeji",

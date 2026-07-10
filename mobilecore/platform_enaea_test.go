@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	enaeaAgg "github.com/yatori-dev/yatori-go-mobile-core/aggregation/enaea"
@@ -47,11 +48,30 @@ const enaeaSessJSON = `{"platform":"enaea","token":"tok"}`
 
 // --- GetCourses ---
 
+func TestLoadEnaeaCourses_ProjectFailureIsReturned(t *testing.T) {
+	projects := []enaeaAgg.EnaeaProject{
+		{ClusterName: "项目A", CircleId: "circle-a"},
+		{ClusterName: "项目B", CircleId: "circle-b"},
+	}
+
+	_, err := loadEnaeaCourses(projects, func(circleId string) ([]enaeaAgg.EnaeaCourse, error) {
+		if circleId == "circle-b" {
+			return nil, errors.New("network down")
+		}
+		return []enaeaAgg.EnaeaCourse{{CourseId: "course-a"}}, nil
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "项目B") {
+		t.Fatalf("project failure should be returned with project context, got %v", err)
+	}
+}
+
 func TestGetCoursesEnaea_RawFields(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	restore := fakeEnaeaCourses([]enaeaAgg.EnaeaCourse{
 		{CourseId: "c1", CircleId: "ci1", SyllabusId: "s1", Remark: "node1",
+			ProjectName: "项目A", TitleTag: "必修",
 			CourseContentType: "video", CourseExternalType: "", CourseContentLink: "http://x",
 			CourseTitle: "课程A", StudyProgress: 50},
 	}, nil)
@@ -68,10 +88,13 @@ func TestGetCoursesEnaea_RawFields(t *testing.T) {
 		t.Fatalf("expected 1 course, got %d", len(res.Courses))
 	}
 	raw := res.Courses[0].Raw
-	for _, f := range []string{"courseId", "circleId", "courseContentType", "courseExternalType", "courseContentLink", "remark"} {
+	for _, f := range []string{"courseId", "circleId", "courseContentType", "courseExternalType", "courseContentLink", "remark", "projectName", "titleTag"} {
 		if _, ok := raw[f]; !ok {
 			t.Errorf("course Raw missing %q", f)
 		}
+	}
+	if raw["projectName"] != "项目A" || raw["titleTag"] != "必修" {
+		t.Fatalf("unexpected hierarchy fields: raw=%v", raw)
 	}
 }
 
@@ -249,6 +272,9 @@ func TestRunTaskEnaea_NormalModeSuccess(t *testing.T) {
 	if res.Raw["progress"] != float64(42) {
 		t.Fatalf("raw.progress=%v, want 42 (host needs it to stop at 100)", res.Raw["progress"])
 	}
+	if res.Raw["SCFUCKPKey"] != "key1" || res.Raw["SCFUCKPValue"] != "val1" {
+		t.Fatalf("ticket was not returned for the next tick: raw=%v", res.Raw)
+	}
 }
 
 func TestRunTaskEnaea_FastModeSuccess(t *testing.T) {
@@ -256,8 +282,16 @@ func TestRunTaskEnaea_FastModeSuccess(t *testing.T) {
 	Init("/tmp/test")
 	restoreStat := fakeEnaeaStatistic("key1", "val1", nil)
 	defer restoreStat()
-	restoreSubmit := fakeEnaeaSubmit(100, nil)
-	defer restoreSubmit()
+	origSubmit := enaeaSubmitProvider
+	var receivedStudyTime int64
+	enaeaSubmitProvider = func(_ *enaeaApi.EnaeaUserCache, _, _, _, _ string, studyTime int64, fast bool) (float64, error) {
+		receivedStudyTime = studyTime
+		if !fast {
+			t.Fatal("fast mode did not reach submit provider")
+		}
+		return 100, nil
+	}
+	defer func() { enaeaSubmitProvider = origSubmit }()
 
 	taskJSON := `{"platform":"enaea","id":"v1","raw":{"courseId":"c1","circleId":"ci1"},"options":{"fast":true}}`
 	e := parseEnvelope(t, RunTask(enaeaSessJSON, taskJSON))
@@ -270,15 +304,41 @@ func TestRunTaskEnaea_FastModeSuccess(t *testing.T) {
 	if res.Status != "submitted" {
 		t.Fatalf("expected submitted, got %q", res.Status)
 	}
+	if receivedStudyTime != 60 {
+		t.Fatalf("fast studyTime=%d, want 60", receivedStudyTime)
+	}
+}
+
+func TestRunTaskEnaea_ReusesTicketFromPreviousOptions(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	called := false
+	orig := enaeaStatisticProvider
+	enaeaStatisticProvider = func(_ *enaeaApi.EnaeaUserCache, _, _, _ string) (string, string, error) {
+		called = true
+		return "new-key", "new-value", nil
+	}
+	defer func() { enaeaStatisticProvider = orig }()
+	restoreSubmit := fakeEnaeaSubmit(84, nil)
+	defer restoreSubmit()
+
+	taskJSON := `{"platform":"enaea","id":"v1","raw":{"courseId":"c1","circleId":"ci1"},"options":{"SCFUCKPKey":"saved-key","SCFUCKPValue":"saved-value"}}`
+	e := parseEnvelope(t, RunTask(enaeaSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("reused-ticket run should succeed: %s", e.Error)
+	}
+	if called {
+		t.Fatal("existing ticket must be reused instead of requesting another statistic ticket")
+	}
 }
 
 func TestRunTaskEnaea_MissingFields(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	cases := []string{
-		`{"platform":"enaea","raw":{"courseId":"c1","circleId":"ci1"}}`,      // no videoId
-		`{"platform":"enaea","id":"v1","raw":{"circleId":"ci1"}}`,             // no courseId
-		`{"platform":"enaea","id":"v1","raw":{"courseId":"c1"}}`,              // no circleId
+		`{"platform":"enaea","raw":{"courseId":"c1","circleId":"ci1"}}`, // no videoId
+		`{"platform":"enaea","id":"v1","raw":{"circleId":"ci1"}}`,       // no courseId
+		`{"platform":"enaea","id":"v1","raw":{"courseId":"c1"}}`,        // no circleId
 	}
 	for i, tj := range cases {
 		e := parseEnvelope(t, RunTask(enaeaSessJSON, tj))

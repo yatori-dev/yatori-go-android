@@ -1,9 +1,9 @@
 package dev.yatori.mobile.runtime.operation
 
 /**
- * Course selection rule for a (platform, account). v1 supports only case-insensitive
- * `contains` keyword matching (see brief §11 — no regex yet). A manual rule does NOT skip
- * the getCourses sync; it only filters which synced courses are scheduled for tasks.
+ * Course selection rule for a (platform, account). Supports generic id/name filters and exact
+ * platform-specific matching. A manual rule does NOT skip getCourses; it only filters which
+ * synced courses are scheduled for tasks.
  */
 data class CourseSelectionRule(
     val mode: Mode = Mode.ALL,
@@ -14,9 +14,26 @@ data class CourseSelectionRule(
     /** Explicit course ids for [Mode.SELECTED]. */
     val selectedCourseIds: List<String> = emptyList(),
 ) {
-    enum class Mode { ALL, SELECTED, MANUAL_CONTAINS, EXACT_NAME }
+    enum class Mode { ALL, SELECTED, MANUAL_CONTAINS, EXACT_NAME, ENAEA_PROJECT_CATEGORY }
 
-    fun matches(courseId: String, courseName: String): Boolean {
+    fun matches(
+        courseId: String,
+        courseName: String,
+        projectName: String = "",
+        titleTag: String = "",
+    ): Boolean {
+        if (mode == Mode.ENAEA_PROJECT_CATEGORY) {
+            fun pathMatches(path: String): Boolean {
+                val parts = path.split("-->", limit = 2).map(String::trim)
+                if (parts.size == 1) {
+                    return parts[0] == projectName || parts[0] == courseName
+                }
+                if (parts[0] != projectName) return false
+                return parts[1] == titleTag
+            }
+            if (excludeKeywords.any(::pathMatches)) return false
+            return includeKeywords.isEmpty() || includeKeywords.any(::pathMatches)
+        }
         if (mode == Mode.EXACT_NAME) {
             if (excludeKeywords.any { it == courseName }) return false
             return includeKeywords.isEmpty() || includeKeywords.any { it == courseName }
@@ -31,6 +48,7 @@ data class CourseSelectionRule(
                 includeKeywords.isEmpty() ||
                     includeKeywords.any { kw -> courseId.contains(kw, ignoreCase = true) || courseName.contains(kw, ignoreCase = true) }
             Mode.EXACT_NAME -> error("handled above")
+            Mode.ENAEA_PROJECT_CATEGORY -> error("handled above")
         }
     }
 }
@@ -49,6 +67,8 @@ data class RunPlan(
     val xuexitong: XuexitongRunOptions = XuexitongRunOptions(),
     /** 1 = normal (30 s incremental, sequential), 2 = fast (submit 100 % once). Mirrors haiqikeji CoursesCustom.videoModel. */
     val haiqikejiVideoModel: Int = 1,
+    /** 0 = off, 1 = normal, 2 = violence (fast=true, studyTime=60). Mirrors ENAEA console. */
+    val enaeaVideoModel: Int = 1,
     /**
      * 1 = normal (5 s cumulative, sequential), 2 = violence (concurrent goroutines, then auto去红),
      * 3 = 去红 (one-shot submit for red nodes only). Mirrors yinghua CoursesCustom.videoModel.

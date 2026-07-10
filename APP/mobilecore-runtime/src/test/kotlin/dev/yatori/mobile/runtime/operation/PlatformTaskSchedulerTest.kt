@@ -104,6 +104,52 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `enaea mode zero skips learning without calling core`() = runTest {
+        val result = taskScheduler.runTask(
+            SessionData("enaea", "stu"),
+            TaskItem("video1", type = "video", platform = "enaea"),
+            PlatformTaskRunOptions(videoModel = 0),
+        )
+
+        assertEquals("skipped", result.status)
+        assertEquals(emptyList(), gateway.options)
+    }
+
+    @Test
+    fun `enaea fast mode uses console study time sixty`() = runTest {
+        gateway.results.add(RunTaskResult("enaea", "video1", "done", raw = JsonObject().apply {
+            addProperty("progress", 100)
+        }))
+
+        taskScheduler.runTask(
+            SessionData("enaea", "stu"),
+            TaskItem("video1", type = "video", platform = "enaea"),
+            PlatformTaskRunOptions(videoModel = 2),
+        )
+
+        assertEquals(true, gateway.options.single()["fast"])
+        assertEquals(60L, gateway.options.single()["studyTime"])
+    }
+
+    @Test
+    fun `enaea tick cap returns incomplete below one hundred`() = runTest {
+        repeat(2) { progress ->
+            gateway.results.add(RunTaskResult("enaea", "video1", "submitted", raw = JsonObject().apply {
+                addProperty("progress", (progress + 1) * 20)
+            }))
+        }
+
+        val result = taskScheduler.runTask(
+            SessionData("enaea", "stu"),
+            TaskItem("video1", type = "video", platform = "enaea"),
+            PlatformTaskRunOptions(maxTicksPerTask = 2),
+        )
+
+        assertEquals("incomplete", result.status)
+        assertEquals(40.0, result.raw.get("progress").asDouble)
+    }
+
+    @Test
     fun `haiqikeji retries a full study cycle when verified progress is below 100`() = runTest {
         val session = SessionData("haiqikeji", "stu")
         val task = TaskItem("node1", type = "video", platform = "haiqikeji", raw = JsonObject().apply {

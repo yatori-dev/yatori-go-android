@@ -35,11 +35,23 @@ var enaeaAllCoursesProvider = func(cache *enaeaApi.EnaeaUserCache) ([]enaeaAgg.E
 	if err != nil {
 		return nil, err
 	}
+	return loadEnaeaCourses(projects, func(circleId string) ([]enaeaAgg.EnaeaCourse, error) {
+		return enaeaAgg.CourseListAction(cache, circleId)
+	})
+}
+
+func loadEnaeaCourses(
+	projects []enaeaAgg.EnaeaProject,
+	load func(circleId string) ([]enaeaAgg.EnaeaCourse, error),
+) ([]enaeaAgg.EnaeaCourse, error) {
 	var all []enaeaAgg.EnaeaCourse
 	for _, p := range projects {
-		courses, err := enaeaAgg.CourseListAction(cache, p.CircleId)
+		courses, err := load(p.CircleId)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("enaea: project %q courses request failed: %w", p.ClusterName, err)
+		}
+		for i := range courses {
+			courses[i].ProjectName = p.ClusterName
 		}
 		all = append(all, courses...)
 	}
@@ -90,6 +102,8 @@ func getCoursesEnaea(sess SessionData) (CourseListResult, error) {
 			Name:     c.CourseTitle,
 			Progress: float64(c.StudyProgress),
 			Raw: map[string]interface{}{
+				"projectName":        c.ProjectName,
+				"titleTag":           c.TitleTag,
 				"courseId":           c.CourseId,
 				"circleId":           c.CircleId,
 				"syllabusId":         c.SyllabusId,
@@ -229,7 +243,7 @@ func runTaskEnaea(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	}
 	if studyTime == 0 {
 		if fast {
-			studyTime = 20
+			studyTime = 60
 		} else {
 			studyTime = time.Now().UnixMilli()
 		}
@@ -237,6 +251,12 @@ func runTaskEnaea(sess SessionData, input TaskInput) (RunTaskResult, error) {
 
 	key := strOf(input.Raw["SCFUCKPKey"])
 	value := strOf(input.Raw["SCFUCKPValue"])
+	if key == "" {
+		key = strOf(input.Options["SCFUCKPKey"])
+	}
+	if value == "" {
+		value = strOf(input.Options["SCFUCKPValue"])
+	}
 	cache := enaeaCache(sess)
 
 	if key == "" || value == "" {
@@ -252,5 +272,9 @@ func runTaskEnaea(sess SessionData, input TaskInput) (RunTaskResult, error) {
 		return RunTaskResult{}, fmt.Errorf("enaea: submit study time failed: %w", err)
 	}
 	return RunTaskResult{Platform: "enaea", TaskID: videoId, Status: "submitted", Message: "mode=" + mode,
-		Raw: map[string]interface{}{"progress": progress}}, nil
+		Raw: map[string]interface{}{
+			"progress":     progress,
+			"SCFUCKPKey":   key,
+			"SCFUCKPValue": value,
+		}}, nil
 }
