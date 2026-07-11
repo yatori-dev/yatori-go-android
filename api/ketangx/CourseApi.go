@@ -11,6 +11,33 @@ import (
 	"github.com/yatori-dev/yatori-go-mobile-core/utils"
 )
 
+var ketangxHTTPClientFactory = func() *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
+		},
+	}}
+}
+
+func ketangxProtectedResponseError(res *http.Response, body []byte) error {
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("ketangx: 账号登录超时，请重新登录")
+	}
+	if res.Request != nil && res.Request.URL != nil && strings.Contains(strings.ToLower(res.Request.URL.Path), "/login") {
+		return fmt.Errorf("ketangx: 账号登录超时，请重新登录")
+	}
+	lowerBody := strings.ToLower(string(body))
+	if strings.Contains(lowerBody, "/login/acclogin") &&
+		strings.Contains(lowerBody, "useraccount") &&
+		strings.Contains(lowerBody, "password") {
+		return fmt.Errorf("ketangx: 账号登录超时，请重新登录")
+	}
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("ketangx: unexpected HTTP status %d", res.StatusCode)
+	}
+	return nil
+}
+
 // 拉取课程对应列表HTML
 func (cache *KetangxUserCache) PullCourseListHTMLApi() (string, error) {
 	urlStr := "https://www.ketangx.cn/Activity/Query"
@@ -18,20 +45,10 @@ func (cache *KetangxUserCache) PullCourseListHTMLApi() (string, error) {
 
 	payload := strings.NewReader("actType=2&actStart=&actClose=&formId=&classId=&actKey=&actState=&timeId=" + fmt.Sprintf("%d", time.Now().UnixMilli()))
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := ketangxHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, payload)
-
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: create course-list request: %w", err)
 	}
 	req.Header.Add("User-Agent", utils.DefaultUserAgent)
 	req.Header.Add("Accept", "*/*")
@@ -44,15 +61,16 @@ func (cache *KetangxUserCache) PullCourseListHTMLApi() (string, error) {
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: course-list request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: read course-list response: %w", err)
+	}
+	if err := ketangxProtectedResponseError(res, body); err != nil {
+		return "", err
 	}
 	cache.Cookies = res.Cookies()
 
@@ -66,25 +84,14 @@ func (cache *KetangxUserCache) PullVideoListHTMLApi(courseId string) (string, er
 	urlStr := "https://www.ketangx.cn/DoAct/ActIndex/" + courseId + "?_=" + fmt.Sprintf("%d", time.Now().UnixMilli())
 	method := "GET"
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := ketangxHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, nil)
-
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: create node-list request: %w", err)
 	}
 	for _, cookie := range cache.Cookies {
 		req.AddCookie(cookie)
 	}
-	//req.Header.Add("Cookie", "ASP.NET_SessionId=4rjzprtyowdj0zg321zymxzt; acw_tc=0b32973617579566456903578e9210c223548f6939dbd7444be03da24735bd; ZHYX=702720bb490846b8aec2b34500dae627_15213625522_2; SERVERID=698319db3a2920f24616a79b4e94f782|1757958314|1757956645; SERVERID=698319db3a2920f24616a79b4e94f782|1757958778|1757956645; ZHYX=702720bb490846b8aec2b34500dae627_15213625522_2")
 	req.Header.Add("User-Agent", utils.DefaultUserAgent)
 	req.Header.Add("Accept", "*/*")
 	req.Header.Add("Host", "www.ketangx.cn")
@@ -92,17 +99,17 @@ func (cache *KetangxUserCache) PullVideoListHTMLApi(courseId string) (string, er
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: node-list request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: read node-list response: %w", err)
 	}
-	//fmt.Println(string(body))
+	if err := ketangxProtectedResponseError(res, body); err != nil {
+		return "", err
+	}
 	return string(body), nil
 }
 
@@ -112,15 +119,7 @@ func (cache *KetangxUserCache) SignVideoStatusApi(sectId string) (string, error)
 	urlStr := "https://www.ketangx.cn/DoAct/GetSection?id=" + sectId + "&_=" + fmt.Sprintf("%d", time.Now().UnixMilli())
 	method := "GET"
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := ketangxHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, nil)
 
 	if err != nil {
@@ -147,31 +146,24 @@ func (cache *KetangxUserCache) SignVideoStatusApi(sectId string) (string, error)
 		fmt.Println(err)
 		return "", err
 	}
+	if err := ketangxProtectedResponseError(res, body); err != nil {
+		return "", err
+	}
 	return string(body), nil
 }
 
 // 完成视频任务点API
-func (cache *KetangxUserCache) CompleteVideoApi(sectId, userId string, studyTime, duration int) (string, error) {
+func (cache *KetangxUserCache) CompleteVideoApi(sectId, submissionID string, studyTime, duration int) (string, error) {
 
 	urlStr := "https://www.ketangx.cn/Common/SetDuration"
 	method := "POST"
 
-	payload := strings.NewReader("studyData%5BSectId%5D=" + sectId + "&studyData%5BUserId%5D=" + userId + "&studyData%5BStudyTime%5D=" + fmt.Sprintf("%d", studyTime) + "&studyData%5BDuraion%5D=" + fmt.Sprintf("%d", duration))
+	payload := strings.NewReader("studyData%5BSectId%5D=" + sectId + "&studyData%5BUserId%5D=" + submissionID + "&studyData%5BStudyTime%5D=" + fmt.Sprintf("%d", studyTime) + "&studyData%5BDuraion%5D=" + fmt.Sprintf("%d", duration))
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // 跳过证书验证，仅用于开发环境
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-	}
+	client := ketangxHTTPClientFactory()
 	req, err := http.NewRequest(method, urlStr, payload)
-
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: create complete request: %w", err)
 	}
 	for _, cookie := range cache.Cookies {
 		req.AddCookie(cookie)
@@ -184,16 +176,16 @@ func (cache *KetangxUserCache) CompleteVideoApi(sectId, userId string, studyTime
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: complete request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", fmt.Errorf("ketangx: read complete response: %w", err)
 	}
-	//fmt.Println(string(body))
+	if err := ketangxProtectedResponseError(res, body); err != nil {
+		return "", err
+	}
 	return string(body), nil
 }

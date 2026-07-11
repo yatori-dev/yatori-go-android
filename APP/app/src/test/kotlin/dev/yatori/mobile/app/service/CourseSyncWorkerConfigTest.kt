@@ -117,6 +117,13 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `ketangx video mode preserves off and normal values`() {
+        assertEquals(0, ketangxVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
+        assertEquals(1, ketangxVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
+        assertEquals(1, ketangxVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 2) }))
+    }
+
+    @Test
     fun `enaea video mode preserves off normal and fast values`() {
         assertEquals(0, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
         assertEquals(1, enaeaVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
@@ -153,6 +160,27 @@ class CourseSyncWorkerConfigTest {
             },
         )
         assertTrue(legacyRule.matches("c4", "旧版APP课程名", "项目B", "选修"))
+    }
+
+    @Test
+    fun `ketangx saved course lists use exact case sensitive name matching`() {
+        val rule = courseSelectionRuleFromCoursesCustom(
+            "ketangx",
+            JsonObject().apply {
+                add("includeCourses", com.google.gson.JsonArray().apply {
+                    add("数学")
+                    add("Math")
+                })
+                add("excludeCourses", com.google.gson.JsonArray().apply { add("英语") })
+            },
+        )
+
+        assertEquals(CourseSelectionRule.Mode.EXACT_NAME, rule.mode)
+        assertTrue(rule.matches("math-id", "数学"))
+        assertFalse(rule.matches("math-id", "高等数学"))
+        assertFalse(rule.matches("math-id", "math"))
+        assertFalse(rule.matches("数学", "其他课程"))
+        assertFalse(rule.matches("english-id", "英语"))
     }
 
     @Test

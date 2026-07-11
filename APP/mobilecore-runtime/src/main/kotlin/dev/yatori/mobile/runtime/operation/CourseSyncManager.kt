@@ -114,6 +114,7 @@ class CourseSyncManager(
     /** Haiqikeji learning modes operate on video nodes; work/exam stay opt-in answer tasks. */
     private fun shouldRunFlatTask(session: SessionData, task: TaskItem, plan: RunPlan): Boolean {
         if (session.platform == "enaea") return plan.enaeaVideoModel != 0
+        if (session.platform == "ketangx") return plan.ketangxVideoModel != 0
         if (session.platform != "haiqikeji") return true
         if (task.type.equals("video", ignoreCase = true)) return plan.haiqikejiVideoModel != 0
         if (!plan.answerPolicy.enabled) return false
@@ -217,6 +218,17 @@ class CourseSyncManager(
                 return submitted
             }
 
+            if (session.platform == "ketangx") {
+                if (plan.ketangxVideoModel != 0) {
+                    submitted.addAll(runKetangxCourses(session, plan, opId, courses, emit))
+                }
+                controller.markDone(
+                    opId,
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
+                )
+                return submitted
+            }
+
             data class Pending(val course: CourseItem, val task: TaskItem)
             val pending = ArrayList<Pending>()
             for (course in courses) {
@@ -273,6 +285,73 @@ class CourseSyncManager(
             emit(SyncEvent("error", "课程同步失败：${e.message}", plan.platform))
             controller.markFailed(opId, detail = e.message ?: "failed")
             throw e
+        }
+        return submitted
+    }
+
+    /** Console parity: independent courses run concurrently; nodes inside one course stay ordered. */
+    private suspend fun runKetangxCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val failures = Collections.synchronizedList(mutableListOf<Throwable>())
+        val total = AtomicInteger()
+        val completed = AtomicInteger()
+        controller.updateProgress(opId, completed = 0, total = 0, detail = "正在拉取课程节点")
+
+        val submitted = coroutineScope {
+            courses.map { course ->
+                async {
+                    if (controller.isCancelling(opId)) return@async emptyList<String>()
+                    val tasks = try {
+                        runner.getTasks(session, course)
+                            .filter { !it.isFinished() && it.id !in plan.completedTaskIds }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        if (e.isSessionExpiredError()) throw e
+                        failures.add(e)
+                        onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
+                        return@async emptyList<String>()
+                    }
+
+                    val discoveredTotal = total.addAndGet(tasks.size)
+                    onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }} 共 ${tasks.size} 个节点", session.platform))
+                    controller.updateProgress(
+                        opId,
+                        completed = completed.get(),
+                        total = discoveredTotal,
+                        detail = "已发现 $discoveredTotal 个任务",
+                    )
+
+                    val courseSubmitted = mutableListOf<String>()
+                    for (task in tasks) {
+                        if (controller.isCancelling(opId)) break
+                        try {
+                            val result = runOneTask(session, task, plan, opId, onEvent)
+                            if (result.isSubmittedOrDone()) courseSubmitted.add(task.id)
+                            onEvent(SyncEvent("info", "${course.name}／${task.name}：${result.status}", session.platform))
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            if (e.isSessionExpiredError()) throw e
+                            failures.add(e)
+                            onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
+                        } finally {
+                            val done = completed.incrementAndGet()
+                            controller.updateProgress(opId, completed = done, total = total.get(), detail = task.name.ifBlank { task.id })
+                        }
+                    }
+                    courseSubmitted
+                }
+            }.awaitAll().flatten()
+        }
+
+        if (failures.isNotEmpty()) {
+            throw IllegalStateException("ketangx: ${failures.size} course/task operations failed", failures.first())
         }
         return submitted
     }

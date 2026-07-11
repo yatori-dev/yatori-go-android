@@ -1,6 +1,7 @@
 package mobilecore
 
 import (
+	"encoding/json"
 	"fmt"
 
 	ketangxAgg "github.com/yatori-dev/yatori-go-mobile-core/aggregation/ketangx"
@@ -43,21 +44,20 @@ func ketangxCache(sess SessionData) *ketangxApi.KetangxUserCache {
 
 // --- replaceable providers (test seams) ---
 
-var ketangxCourseListProvider = func(cache *ketangxApi.KetangxUserCache) []ketangxAgg.KetangxCourse {
+var ketangxCourseListProvider = func(cache *ketangxApi.KetangxUserCache) ([]ketangxAgg.KetangxCourse, error) {
 	return ketangxAgg.PullCourseListAction(cache)
 }
 
 var ketangxNodeProvider = func(cache *ketangxApi.KetangxUserCache, courseId string) ([]ketangxAgg.KetangxNode, error) {
-	nodes := ketangxAgg.PullNodeListAction(cache, &ketangxAgg.KetangxCourse{ActivityId: courseId})
-	return nodes, nil
+	return ketangxAgg.PullNodeListAction(cache, &ketangxAgg.KetangxCourse{ActivityId: courseId})
 }
 
 var ketangxSignProvider = func(cache *ketangxApi.KetangxUserCache, sectId string) (string, error) {
 	return cache.SignVideoStatusApi(sectId)
 }
 
-var ketangxCompleteProvider = func(cache *ketangxApi.KetangxUserCache, sectId, userId string, studyTime, duration int) (string, error) {
-	return cache.CompleteVideoApi(sectId, userId, studyTime, duration)
+var ketangxCompleteProvider = func(cache *ketangxApi.KetangxUserCache, sectId, submissionID string, studyTime, duration int) (string, error) {
+	return cache.CompleteVideoApi(sectId, submissionID, studyTime, duration)
 }
 
 func getCoursesKetangx(sess SessionData) (CourseListResult, error) {
@@ -65,7 +65,10 @@ func getCoursesKetangx(sess SessionData) (CourseListResult, error) {
 	userId := strOf(sess.Extra["userId"])
 	id := strOf(sess.Extra["id"])
 	userName := strOf(sess.Extra["userName"])
-	courses := ketangxCourseListProvider(cache)
+	courses, err := ketangxCourseListProvider(cache)
+	if err != nil {
+		return CourseListResult{}, fmt.Errorf("ketangx: courses request failed: %w", err)
+	}
 	items := make([]CourseItem, 0, len(courses))
 	for _, c := range courses {
 		items = append(items, CourseItem{
@@ -195,15 +198,12 @@ func runTaskKetangx(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if sectId == "" {
 		return RunTaskResult{}, fmt.Errorf("ketangx: taskJSON.id (or raw.sectId) is required")
 	}
-	userId := strOf(input.Raw["userId"])
-	if userId == "" {
-		userId = strOf(sess.Extra["userId"])
+	submissionID := strOf(input.Raw["id"])
+	if submissionID == "" {
+		submissionID = strOf(sess.Extra["id"])
 	}
-	if userId == "" {
-		userId = strOf(sess.Extra["id"])
-	}
-	if userId == "" {
-		return RunTaskResult{}, fmt.Errorf("ketangx: taskJSON.raw.userId is required")
+	if submissionID == "" {
+		return RunTaskResult{}, fmt.Errorf("ketangx: taskJSON.raw.id is required")
 	}
 
 	studyTime := 114514
@@ -227,8 +227,22 @@ func runTaskKetangx(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if _, err := ketangxSignProvider(cache, sectId); err != nil {
 		return RunTaskResult{}, fmt.Errorf("ketangx: sign video status failed: %w", err)
 	}
-	if _, err := ketangxCompleteProvider(cache, sectId, userId, studyTime, duration); err != nil {
+	completeRaw, err := ketangxCompleteProvider(cache, sectId, submissionID, studyTime, duration)
+	if err != nil {
 		return RunTaskResult{}, fmt.Errorf("ketangx: complete video failed: %w", err)
+	}
+	var completeResponse struct {
+		Success *bool  `json:"Success"`
+		Message string `json:"Message"`
+	}
+	if err := json.Unmarshal([]byte(completeRaw), &completeResponse); err != nil {
+		return RunTaskResult{}, fmt.Errorf("ketangx: complete video returned invalid response: %w", err)
+	}
+	if completeResponse.Success == nil {
+		return RunTaskResult{}, fmt.Errorf("ketangx: complete video response missing Success")
+	}
+	if !*completeResponse.Success {
+		return RunTaskResult{}, fmt.Errorf("ketangx: complete video rejected: %s", completeResponse.Message)
 	}
 	return RunTaskResult{
 		Platform: "ketangx",

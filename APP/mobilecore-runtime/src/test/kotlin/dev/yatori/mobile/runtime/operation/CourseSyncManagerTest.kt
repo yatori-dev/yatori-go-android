@@ -7,8 +7,10 @@ import dev.yatori.mobile.api.dto.RunTaskResult
 import dev.yatori.mobile.api.dto.SessionData
 import dev.yatori.mobile.api.dto.TaskItem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -448,6 +450,59 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `ketangx task failure fails the batch instead of reporting completion`() = runTest {
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) =
+                listOf(CourseItem("c1", name = "课程", platform = "ketangx"))
+
+            override suspend fun getTasks(session: SessionData, course: CourseItem) =
+                listOf(TaskItem("t1", name = "视频", type = "video", platform = "ketangx"))
+
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: Map<String, Any>,
+            ): RunTaskResult = throw IllegalStateException("network down")
+        }
+        val controller = OperationController(now = { 0L })
+        val mgr = CourseSyncManager(runner, controller)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(SessionData("ketangx", "stu"), RunPlan("ketangx-error", "ketangx", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("operations failed"))
+        assertEquals(OperationStatus.FAILED, controller.operations.value.single().status)
+    }
+
+    @Test
+    fun `ketangx session expiry reaches the app relogin boundary`() = runTest {
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) =
+                listOf(CourseItem("c1", name = "课程", platform = "ketangx"))
+
+            override suspend fun getTasks(session: SessionData, course: CourseItem) =
+                listOf(TaskItem("t1", name = "视频", type = "video", platform = "ketangx"))
+
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: Map<String, Any>,
+            ): RunTaskResult = throw IllegalStateException("ketangx: 账号登录超时，请重新登录")
+        }
+        val controller = OperationController(now = { 0L })
+        val mgr = CourseSyncManager(runner, controller)
+
+        val error = assertFailsWith<IllegalStateException> {
+            mgr.run(SessionData("ketangx", "stu"), RunPlan("ketangx-expired", "ketangx", "stu"))
+        }
+
+        assertTrue(error.message.orEmpty().contains("账号登录超时，请重新登录"))
+        assertTrue(error.isSessionExpiredError())
+        assertEquals(OperationStatus.FAILED, controller.operations.value.single().status)
+    }
+
+    @Test
     fun `completedTaskIds are not resubmitted on resume`() = runTest {
         val runner = FakeRunner(
             courses = listOf(course("c1", "math")),
@@ -843,6 +898,108 @@ class CourseSyncManagerTest {
 
         assertTrue(submitted.isEmpty())
         assertTrue(platformRunner.submitted.isEmpty())
+    }
+
+    @Test
+    fun `ketangx video mode zero does not schedule learning tasks`() = runTest {
+        val ketangxSession = SessionData("ketangx", "stu")
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("c1", name = "course", platform = "ketangx")),
+            tasksByCourse = mapOf(
+                "c1" to listOf(TaskItem("video1", name = "video", type = "video", platform = "ketangx")),
+            ),
+        )
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        val submitted = mgr.run(
+            ketangxSession,
+            RunPlan("ketangx-disabled", "ketangx", "stu", ketangxVideoModel = 0),
+        )
+
+        assertTrue(submitted.isEmpty())
+        assertTrue(runner.submitted.isEmpty())
+    }
+
+    @Test
+    fun `ketangx runs courses concurrently but keeps nodes sequential within each course`() = runTest {
+        val courses = listOf(
+            CourseItem("c1", name = "course-1", platform = "ketangx"),
+            CourseItem("c2", name = "course-2", platform = "ketangx"),
+        )
+        val runner = object : CourseTaskRunner {
+            var active = 0
+            var maxActive = 0
+            val activeByCourse = mutableMapOf<String, Int>()
+            var maxPerCourse = 0
+
+            override suspend fun getCourses(session: SessionData) = courses
+
+            override suspend fun getTasks(session: SessionData, course: CourseItem) = listOf(
+                TaskItem("${course.id}-1", name = "first", type = "video", platform = "ketangx"),
+                TaskItem("${course.id}-2", name = "second", type = "document", platform = "ketangx"),
+            )
+
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: Map<String, Any>,
+            ): RunTaskResult {
+                val courseId = task.id.substringBeforeLast("-")
+                active += 1
+                maxActive = maxOf(maxActive, active)
+                val courseActive = activeByCourse.getOrDefault(courseId, 0) + 1
+                activeByCourse[courseId] = courseActive
+                maxPerCourse = maxOf(maxPerCourse, courseActive)
+                return try {
+                    delay(10)
+                    RunTaskResult("ketangx", task.id, "submitted")
+                } finally {
+                    active -= 1
+                    activeByCourse[courseId] = activeByCourse.getValue(courseId) - 1
+                }
+            }
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        val submitted = mgr.run(SessionData("ketangx", "stu"), RunPlan("ketangx-parallel", "ketangx", "stu"))
+
+        assertEquals(setOf("c1-1", "c1-2", "c2-1", "c2-2"), submitted.toSet())
+        assertTrue(runner.maxActive > 1)
+        assertEquals(1, runner.maxPerCourse)
+    }
+
+    @Test
+    fun `ketangx ready course starts before another course finishes loading nodes`() = runTest {
+        val releaseSlowCourse = CompletableDeferred<Unit>()
+        val executed = mutableListOf<String>()
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) = listOf(
+                CourseItem("slow", name = "slow", platform = "ketangx"),
+                CourseItem("ready", name = "ready", platform = "ketangx"),
+            )
+
+            override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+                if (course.id == "slow") releaseSlowCourse.await()
+                return listOf(TaskItem("${course.id}-task", name = course.id, type = "video", platform = "ketangx"))
+            }
+
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: Map<String, Any>,
+            ): RunTaskResult {
+                executed.add(task.id)
+                if (task.id == "ready-task") releaseSlowCourse.complete(Unit)
+                return RunTaskResult("ketangx", task.id, "submitted")
+            }
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        withTimeout(1_000) {
+            mgr.run(SessionData("ketangx", "stu"), RunPlan("ketangx-no-fetch-barrier", "ketangx", "stu"))
+        }
+
+        assertEquals(listOf("ready-task", "slow-task"), executed)
     }
 
     @Test

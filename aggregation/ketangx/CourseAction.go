@@ -23,16 +23,16 @@ type KetangxNode struct {
 	Type       string `json:"type"`
 }
 
-func PullCourseListAction(cache *ketangx.KetangxUserCache) []KetangxCourse {
-	course, err2 := cache.PullCourseListHTMLApi()
-	if err2 != nil {
-		fmt.Println(err2)
+func PullCourseListAction(cache *ketangx.KetangxUserCache) ([]KetangxCourse, error) {
+	course, err := cache.PullCourseListHTMLApi()
+	if err != nil {
+		return nil, fmt.Errorf("ketangx: pull course list: %w", err)
 	}
 	courseList := []KetangxCourse{}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader([]byte(course)))
 	if err != nil {
-		fmt.Println(err)
+		return nil, fmt.Errorf("ketangx: parse course list: %w", err)
 	}
 	doc.Find("div.course-history").Each(func(i int, s *goquery.Selection) {
 		title := ""
@@ -59,18 +59,21 @@ func PullCourseListAction(cache *ketangx.KetangxUserCache) []KetangxCourse {
 			Progress:   progress,
 		})
 	})
-	return courseList
+	return courseList, nil
 }
 
 // 拉取对应课程视频列表
-func PullNodeListAction(cache *ketangx.KetangxUserCache, course *KetangxCourse) []KetangxNode {
+func PullNodeListAction(cache *ketangx.KetangxUserCache, course *KetangxCourse) ([]KetangxNode, error) {
 	html, err := cache.PullVideoListHTMLApi(course.ActivityId)
-	videoList := []KetangxNode{}
 	if err != nil {
-		fmt.Println(err)
+		return nil, fmt.Errorf("ketangx: pull node list: %w", err)
 	}
+	videoList := []KetangxNode{}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader([]byte(html)))
+	if err != nil {
+		return nil, fmt.Errorf("ketangx: parse node list: %w", err)
+	}
 	doc.Find("li.wis-leftNodeItem[sectli]").Each(func(i int, s *goquery.Selection) {
 		text := s.Find("div.wis-iconActive-tit").Text()
 		if text != "视频" && text != "文档" {
@@ -93,7 +96,7 @@ func PullNodeListAction(cache *ketangx.KetangxUserCache, course *KetangxCourse) 
 		videoData.Type = text
 		videoList = append(videoList, videoData)
 	})
-	return videoList
+	return videoList, nil
 }
 
 // 直接完成视频

@@ -67,6 +67,8 @@ data class RunPlan(
     val xuexitong: XuexitongRunOptions = XuexitongRunOptions(),
     /** 1 = normal (30 s incremental, sequential), 2 = fast (submit 100 % once). Mirrors haiqikeji CoursesCustom.videoModel. */
     val haiqikejiVideoModel: Int = 1,
+    /** 0 = off, 1 = normal one-shot completion. Mirrors ketangx CoursesCustom.videoModel. */
+    val ketangxVideoModel: Int = 1,
     /** 0 = off, 1 = normal, 2 = violence (fast=true, studyTime=60). Mirrors ENAEA console. */
     val enaeaVideoModel: Int = 1,
     /**

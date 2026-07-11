@@ -19,6 +19,7 @@ class CourseSessionRecoveryTest {
         )
 
         assertTrue(isSessionExpiredError(error))
+        assertTrue(isSessionExpiredError(IllegalStateException("ketangx: 账号登录超时，请重新登录")))
         assertFalse(isSessionExpiredError(IllegalStateException("登录验证码识别失败")))
         assertFalse(isSessionExpiredError(IllegalStateException("course list parse error")))
     }

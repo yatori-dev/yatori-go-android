@@ -11,10 +11,10 @@ import (
 
 // --- test seams ---
 
-func fakeKetangxCourseList(courses []ketangxAgg.KetangxCourse) func() {
+func fakeKetangxCourseList(courses []ketangxAgg.KetangxCourse, err error) func() {
 	orig := ketangxCourseListProvider
-	ketangxCourseListProvider = func(_ *ketangxApi.KetangxUserCache) []ketangxAgg.KetangxCourse {
-		return courses
+	ketangxCourseListProvider = func(_ *ketangxApi.KetangxUserCache) ([]ketangxAgg.KetangxCourse, error) {
+		return courses, err
 	}
 	return func() { ketangxCourseListProvider = orig }
 }
@@ -45,7 +45,7 @@ func fakeKetangxComplete(raw string, err error) func() {
 
 const ketangxSessJSON = `{"platform":"ketangx","cookies":"SESS=x","extra":{"userId":"u1","id":"i1","userName":"un1"}}`
 const ketangxCourseJSON = `{"platform":"ketangx","id":"a1","raw":{"courseId":"a1","activityId":"a1","title":"课程A","userId":"u1","id":"i1","userName":"un1"}}`
-const ketangxRunTaskJSON = `{"platform":"ketangx","id":"s1","raw":{"sectId":"s1","courseId":"a1","activityId":"a1","userId":"u1"}}`
+const ketangxRunTaskJSON = `{"platform":"ketangx","id":"s1","raw":{"sectId":"s1","courseId":"a1","activityId":"a1","userId":"u1","id":"i1"}}`
 
 // --- GetCourses ---
 
@@ -54,7 +54,7 @@ func TestGetCoursesKetangx_RawFields(t *testing.T) {
 	Init("/tmp/test")
 	restore := fakeKetangxCourseList([]ketangxAgg.KetangxCourse{
 		{Title: "课程A", ActivityId: "a1", Progress: 50},
-	})
+	}, nil)
 	defer restore()
 
 	e := parseEnvelope(t, GetCourses(ketangxSessJSON))
@@ -75,6 +75,18 @@ func TestGetCoursesKetangx_RawFields(t *testing.T) {
 	}
 	if res.Courses[0].ID != "a1" {
 		t.Fatalf("course ID=%q", res.Courses[0].ID)
+	}
+}
+
+func TestGetCoursesKetangx_ProviderError(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restore := fakeKetangxCourseList(nil, errors.New("network down"))
+	defer restore()
+
+	e := parseEnvelope(t, GetCourses(ketangxSessJSON))
+	if e.OK {
+		t.Fatal("course provider error must fail instead of returning an empty list")
 	}
 }
 
@@ -194,7 +206,7 @@ func TestRunTaskKetangx_DryRun(t *testing.T) {
 	}
 	defer func() { ketangxSignProvider = orig }()
 
-	taskJSON := `{"platform":"ketangx","id":"s1","raw":{"userId":"u1"},"options":{"dryRun":true}}`
+	taskJSON := `{"platform":"ketangx","id":"s1","raw":{"id":"i1"},"options":{"dryRun":true}}`
 	e := parseEnvelope(t, RunTask(ketangxSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("dry run should succeed: %s", e.Error)
@@ -210,12 +222,36 @@ func TestRunTaskKetangx_DryRun(t *testing.T) {
 	}
 }
 
+func TestRunTaskKetangx_UsesSubmissionIDNotUserID(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restoreSign := fakeKetangxSign(`ok`, nil)
+	defer restoreSign()
+
+	var capturedID string
+	orig := ketangxCompleteProvider
+	ketangxCompleteProvider = func(_ *ketangxApi.KetangxUserCache, _, submissionID string, _, _ int) (string, error) {
+		capturedID = submissionID
+		return `{"Success":true}`, nil
+	}
+	defer func() { ketangxCompleteProvider = orig }()
+
+	taskJSON := `{"platform":"ketangx","id":"s1","raw":{"sectId":"s1","userId":"u1","id":"i1"}}`
+	e := parseEnvelope(t, RunTask(ketangxSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("submit should succeed: %s", e.Error)
+	}
+	if capturedID != "i1" {
+		t.Fatalf("complete submission ID=%q, want Core cache.Id i1", capturedID)
+	}
+}
+
 func TestRunTaskKetangx_SubmitSuccess(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	restoreSign := fakeKetangxSign(`ok`, nil)
 	defer restoreSign()
-	restoreComplete := fakeKetangxComplete(`ok`, nil)
+	restoreComplete := fakeKetangxComplete(`{"Success":true}`, nil)
 	defer restoreComplete()
 
 	e := parseEnvelope(t, RunTask(ketangxSessJSON, ketangxRunTaskJSON))
@@ -233,6 +269,42 @@ func TestRunTaskKetangx_SubmitSuccess(t *testing.T) {
 	}
 }
 
+func TestRunTaskKetangx_RejectsCompleteSuccessFalse(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restoreSign := fakeKetangxSign(`ok`, nil)
+	defer restoreSign()
+	restoreComplete := fakeKetangxComplete(`{"Success":false,"Message":"rejected"}`, nil)
+	defer restoreComplete()
+
+	e := parseEnvelope(t, RunTask(ketangxSessJSON, ketangxRunTaskJSON))
+	if e.OK {
+		t.Fatal("Success=false must not be reported as submitted")
+	}
+}
+
+func TestRunTaskKetangx_RejectsInvalidCompleteResponses(t *testing.T) {
+	for name, raw := range map[string]string{
+		"empty":           "",
+		"malformed":       "{",
+		"missing-success": `{"Message":"unknown"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetState()
+			Init("/tmp/test")
+			restoreSign := fakeKetangxSign(`ok`, nil)
+			defer restoreSign()
+			restoreComplete := fakeKetangxComplete(raw, nil)
+			defer restoreComplete()
+
+			e := parseEnvelope(t, RunTask(ketangxSessJSON, ketangxRunTaskJSON))
+			if e.OK {
+				t.Fatalf("complete response %q must not be reported as submitted", raw)
+			}
+		})
+	}
+}
+
 func TestRunTaskKetangx_MissingSectId(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
@@ -242,14 +314,14 @@ func TestRunTaskKetangx_MissingSectId(t *testing.T) {
 	}
 }
 
-func TestRunTaskKetangx_MissingUserId(t *testing.T) {
+func TestRunTaskKetangx_MissingSubmissionID(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
-	// no userId in raw, session extra also cleared
+	// no id in raw, session extra also cleared
 	sessJSON := `{"platform":"ketangx","cookies":"SESS=x","extra":{}}`
-	e := parseEnvelope(t, RunTask(sessJSON, `{"platform":"ketangx","id":"s1","raw":{}}`))
+	e := parseEnvelope(t, RunTask(sessJSON, `{"platform":"ketangx","id":"s1","raw":{"userId":"u1"}}`))
 	if e.OK {
-		t.Fatal("missing userId should fail")
+		t.Fatal("missing submission id should fail")
 	}
 }
 
@@ -285,13 +357,13 @@ func TestRunTaskKetangx_StudyTimeOptions(t *testing.T) {
 	ketangxCompleteProvider = func(_ *ketangxApi.KetangxUserCache, _ string, _ string, st, dur int) (string, error) {
 		capturedStudyTime = st
 		capturedDuration = dur
-		return "ok", nil
+		return `{"Success":true}`, nil
 	}
 	defer func() { ketangxCompleteProvider = orig }()
 	restoreSign := fakeKetangxSign(`ok`, nil)
 	defer restoreSign()
 
-	taskJSON := `{"platform":"ketangx","id":"s1","raw":{"userId":"u1"},"options":{"studyTime":200,"duration":300}}`
+	taskJSON := `{"platform":"ketangx","id":"s1","raw":{"id":"i1"},"options":{"studyTime":200,"duration":300}}`
 	e := parseEnvelope(t, RunTask(ketangxSessJSON, taskJSON))
 	if !e.OK {
 		t.Fatalf("should succeed: %s", e.Error)
