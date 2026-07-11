@@ -901,6 +901,107 @@ class CourseSyncManagerTest {
     }
 
     @Test
+    fun `qingshuxuetang skips courses that are not currently studying`() = runTest {
+        val session = SessionData("qingshuxuetang", "stu")
+        val ended = CourseItem("ended", name = "ended", platform = "qingshuxuetang", raw = JsonObject().apply {
+            addProperty("studyStatusName", "已结课")
+        })
+        val active = CourseItem("active", name = "active", platform = "qingshuxuetang", raw = JsonObject().apply {
+            addProperty("studyStatusName", "在修")
+        })
+        val runner = FakeRunner(
+            courses = listOf(ended, active),
+            tasksByCourse = mapOf(
+                "ended" to listOf(TaskItem("old-video", type = "video", platform = "qingshuxuetang")),
+                "active" to listOf(TaskItem("active-video", type = "video", platform = "qingshuxuetang")),
+            ),
+        )
+        val calls = mutableListOf<String>()
+        val platformRunner = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = true
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult {
+                calls.add(task.id)
+                return RunTaskResult(session.platform, task.id, "done")
+            }
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner = platformRunner)
+
+        mgr.run(session, RunPlan("qsxt-eligibility", "qingshuxuetang", "stu"))
+
+        assertEquals(listOf("active-video"), calls)
+    }
+
+    @Test
+    fun `qingshuxuetang stops remaining courseware after refreshed score reaches target`() = runTest {
+        val session = SessionData("qingshuxuetang", "stu")
+        val course = CourseItem("45", name = "course", platform = "qingshuxuetang", raw = JsonObject().apply {
+            addProperty("coursewareLearnGainScore", 0)
+            addProperty("coursewareLearnTotalScore", 30)
+            addProperty("courseMaterialsLearnGainScore", 0)
+            addProperty("courseMaterialsLearnTotalScore", 15)
+        })
+        val runner = FakeRunner(
+            courses = listOf(course),
+            tasksByCourse = mapOf(
+                "45" to listOf(
+                    TaskItem("video1", name = "video 1", type = "video", platform = "qingshuxuetang"),
+                    TaskItem("video2", name = "video 2", type = "video", platform = "qingshuxuetang"),
+                ),
+            ),
+        )
+        val calls = mutableListOf<String>()
+        val platformRunner = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = session.platform == "qingshuxuetang"
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult {
+                calls.add(task.id)
+                return RunTaskResult(session.platform, task.id, "done", raw = JsonObject().apply {
+                    addProperty("coursewareLearnGainScore", 30)
+                    addProperty("coursewareLearnTotalScore", 30)
+                    addProperty("courseMaterialsLearnGainScore", 0)
+                    addProperty("courseMaterialsLearnTotalScore", 15)
+                })
+            }
+        }
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }), platformRunner = platformRunner)
+
+        mgr.run(session, RunPlan("qsxt-score-gate", "qingshuxuetang", "stu"))
+
+        assertEquals(listOf("video1"), calls)
+    }
+
+    @Test
+    fun `qingshuxuetang video mode zero does not schedule learning tasks`() = runTest {
+        val session = SessionData("qingshuxuetang", "stu")
+        val runner = FakeRunner(
+            courses = listOf(CourseItem("45", name = "course", platform = "qingshuxuetang")),
+            tasksByCourse = mapOf(
+                "45" to listOf(TaskItem("video1", name = "video", type = "video", platform = "qingshuxuetang")),
+            ),
+        )
+        val mgr = CourseSyncManager(runner, OperationController(now = { 0L }))
+
+        val submitted = mgr.run(
+            session,
+            RunPlan("qsxt-disabled", "qingshuxuetang", "stu", qingshuxuetangVideoModel = 0),
+        )
+
+        assertTrue(submitted.isEmpty())
+        assertTrue(runner.submitted.isEmpty())
+    }
+
+    @Test
     fun `ketangx video mode zero does not schedule learning tasks`() = runTest {
         val ketangxSession = SessionData("ketangx", "stu")
         val runner = FakeRunner(

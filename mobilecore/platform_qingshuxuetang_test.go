@@ -174,38 +174,54 @@ func TestCancelLoginDeletesQsxtTask(t *testing.T) {
 	}
 }
 
-func TestGetCoursesQsxt_RawFields(t *testing.T) {
-	// Verify expanded Raw includes schoolId/periodId/courseId for GetCourseDetail
-	raw := `{"hr":0,"data":[{"classId":"c1","courseName":"课程A","progress":0.5,"schoolName":"学校","schoolId":"s1","semesterId":"p1","courseId":"co1"}]}`
+func TestGetCoursesQsxt_ParsesReferenceNestedShape(t *testing.T) {
+	// Core PullCourseListAction parses project -> periods -> courses; keep the fields
+	// used by the Console eligibility and exact-name filters.
+	raw := `{"hr":0,"data":[{"classId":45,"name":"护理项目","schoolName":"学校","schoolId":114079,"periods":[{"id":24,"year":"2025","name":"秋季","courses":[{"id":"879","name":"药理学","studyStatus":1,"studyStatusName":"在修","allowLearn":true}]}]}]}`
 	orig := qsxtCoursesProvider
-	defer func() { qsxtCoursesProvider = orig }()
+	origScore := qsxtCourseScoreProvider
+	defer func() {
+		qsxtCoursesProvider = orig
+		qsxtCourseScoreProvider = origScore
+	}()
 	qsxtCoursesProvider = func(_ string) (string, error) { return raw, nil }
+	qsxtCourseScoreProvider = func(_, periodID, classID, schoolID, courseID string) (string, error) {
+		return `{"hr":0,"data":{"rows":[{"id":879,"periodId":24,"usualScores":[{"type":2,"maxScore":30,"score":10},{"type":4,"maxScore":20,"score":5},{"type":6,"maxScore":15,"score":3}]}]}}`, nil
+	}
 
 	resetState()
 	Init("/tmp/test")
 	sessJSON := `{"platform":"qingshuxuetang","token":"tok"}`
 	e := parseEnvelope(t, GetCourses(sessJSON))
 	if !e.OK {
-		t.Fatalf("GetCourses failed: %s", e.Error)
+		t.Fatalf("GetCourses failed for reference nested shape: %s", e.Error)
 	}
 	b, _ := json.Marshal(e.Data)
 	var res CourseListResult
 	json.Unmarshal(b, &res)
 	if len(res.Courses) != 1 {
-		t.Fatalf("expected 1 course, got %d", len(res.Courses))
+		t.Fatalf("expected 1 flattened course, got %d", len(res.Courses))
 	}
 	c := res.Courses[0]
-	if c.ID != "c1" {
-		t.Fatalf("id=%q", c.ID)
+	if c.ID != "45" || c.Name != "药理学" {
+		t.Fatalf("course id/name=%q/%q", c.ID, c.Name)
 	}
-	if c.Raw["schoolId"] != "s1" {
-		t.Fatalf("schoolId=%v", c.Raw["schoolId"])
-	}
-	if c.Raw["periodId"] != "p1" {
-		t.Fatalf("periodId=%v", c.Raw["periodId"])
-	}
-	if c.Raw["courseId"] != "co1" {
-		t.Fatalf("courseId=%v", c.Raw["courseId"])
+	for key, want := range map[string]interface{}{
+		"classId":                        "45",
+		"schoolId":                       "114079",
+		"periodId":                       "24",
+		"courseId":                       "879",
+		"projectName":                    "护理项目",
+		"studyStatusName":                "在修",
+		"allowLearn":                     true,
+		"coursewareLearnGainScore":       float64(10),
+		"coursewareLearnTotalScore":      float64(30),
+		"courseMaterialsLearnGainScore":  float64(3),
+		"courseMaterialsLearnTotalScore": float64(15),
+	} {
+		if got := c.Raw[key]; got != want {
+			t.Fatalf("raw[%q]=%v, want %v", key, got, want)
+		}
 	}
 }
 
@@ -295,6 +311,145 @@ func TestGetCourseDetailQsxt_RawIncludesCoursewareUrl(t *testing.T) {
 	}
 	if !strings.Contains(url, "coursewareTree") {
 		t.Fatalf("coursewareUrl looks wrong: %q", url)
+	}
+}
+
+func TestGetTasksQsxt_FetchesDetailAndFlattensReferenceTree(t *testing.T) {
+	origDetail := qsxtCourseDetailProvider
+	origNode := qsxtNodeProvider
+	origRecord := qsxtStudyRecordProvider
+	defer func() {
+		qsxtCourseDetailProvider = origDetail
+		qsxtNodeProvider = origNode
+		qsxtStudyRecordProvider = origRecord
+	}()
+	qsxtCourseDetailProvider = func(_, periodID, classID, schoolID, courseID string) (string, error) {
+		if periodID != "24" || classID != "45" || schoolID != "114079" || courseID != "879" {
+			t.Fatalf("detail args=%q/%q/%q/%q", periodID, classID, schoolID, courseID)
+		}
+		return `{"hr":0,"data":{"coursewareUrl":"https://api.qingshuxuetang.com/tree"}}`, nil
+	}
+	qsxtNodeProvider = func(_ string, nodeURL string) (string, error) {
+		if nodeURL != "https://api.qingshuxuetang.com/tree" {
+			t.Fatalf("node url=%q", nodeURL)
+		}
+		return `{"hr":0,"data":{"id":"root","name":"课程树","nodes":[{"id":"chapter-1","name":"第一章","type":"chapter","nodes":[{"id":"video-1","name":"视频一","type":"video","duration":600000}]}]}}`, nil
+	}
+	qsxtStudyRecordProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":[]}`, nil
+	}
+
+	resetState()
+	Init("/tmp/test")
+	courseJSON := `{"platform":"qingshuxuetang","id":"45","raw":{"classId":"45","schoolId":"114079","periodId":"24","courseId":"879"}}`
+	e := parseEnvelope(t, GetTasks(`{"platform":"qingshuxuetang","token":"tok"}`, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed for reference tree: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 1 {
+		t.Fatalf("expected only the non-chapter node, got %d", len(res.Tasks))
+	}
+	task := res.Tasks[0]
+	if task.ID != "video-1" || task.Type != "video" {
+		t.Fatalf("task id/type=%q/%q", task.ID, task.Type)
+	}
+	if task.Raw["duration"] != float64(600) {
+		t.Fatalf("duration=%v, want 600 seconds", task.Raw["duration"])
+	}
+	for key, want := range map[string]interface{}{
+		"classId": "45", "schoolId": "114079", "periodId": "24", "courseId": "879", "contentType": "11",
+	} {
+		if got := task.Raw[key]; got != want {
+			t.Fatalf("raw[%q]=%v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestGetTasksQsxt_MergesReferenceStudyRecords(t *testing.T) {
+	origDetail := qsxtCourseDetailProvider
+	origNode := qsxtNodeProvider
+	origRecord := qsxtStudyRecordProvider
+	defer func() {
+		qsxtCourseDetailProvider = origDetail
+		qsxtNodeProvider = origNode
+		qsxtStudyRecordProvider = origRecord
+	}()
+	qsxtCourseDetailProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":{"coursewareUrl":"https://api.qingshuxuetang.com/tree"}}`, nil
+	}
+	qsxtNodeProvider = func(_, _ string) (string, error) {
+		return `{"hr":0,"data":{"nodes":[{"id":"video-1","name":"视频一","type":"video","duration":60000},{"id":"video-2","name":"视频二","type":"video","duration":120000}]}}`, nil
+	}
+	qsxtStudyRecordProvider = func(_, periodID, classID, schoolID, courseID string) (string, error) {
+		return `{"hr":0,"data":[{"contentId":"video-1","totalstudyDuration":61,"studyTimes":2,"lastStudyTime":60,"maxStudyPosition":60},{"contentId":"video-2","totalstudyDuration":30,"studyTimes":1,"lastStudyTime":30,"maxStudyPosition":30}]}`, nil
+	}
+
+	resetState()
+	Init("/tmp/test")
+	courseJSON := `{"platform":"qingshuxuetang","id":"45","raw":{"classId":"45","schoolId":"114079","periodId":"24","courseId":"879"}}`
+	e := parseEnvelope(t, GetTasks(`{"platform":"qingshuxuetang","token":"tok"}`, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 2 {
+		t.Fatalf("tasks=%d", len(res.Tasks))
+	}
+	if res.Tasks[0].Status != "done" {
+		t.Fatalf("completed record status=%q, want done", res.Tasks[0].Status)
+	}
+	if res.Tasks[1].Status == "done" || res.Tasks[1].Raw["totalStudyDuration"] != float64(30) {
+		t.Fatalf("partial record=%+v", res.Tasks[1])
+	}
+}
+
+func TestGetTasksQsxt_IncludesReferenceCourseMaterials(t *testing.T) {
+	origDetail := qsxtCourseDetailProvider
+	origNode := qsxtNodeProvider
+	origRecord := qsxtStudyRecordProvider
+	origMaterials := qsxtMaterialsProvider
+	defer func() {
+		qsxtCourseDetailProvider = origDetail
+		qsxtNodeProvider = origNode
+		qsxtStudyRecordProvider = origRecord
+		qsxtMaterialsProvider = origMaterials
+	}()
+	qsxtCourseDetailProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":{"coursewareUrl":"https://api.qingshuxuetang.com/tree"}}`, nil
+	}
+	qsxtNodeProvider = func(_, _ string) (string, error) {
+		return `{"hr":0,"data":{"nodes":[]}}`, nil
+	}
+	qsxtStudyRecordProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":[]}`, nil
+	}
+	qsxtMaterialsProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":{"materials":[{"id":101,"name":"讲义"}],"ebooks":[{"id":202,"bookId":"book-202","name":"电子书"}]}}`, nil
+	}
+
+	resetState()
+	Init("/tmp/test")
+	courseJSON := `{"platform":"qingshuxuetang","id":"45","raw":{"classId":"45","schoolId":"114079","periodId":"24","courseId":"879","coursewareLearnGainScore":30,"coursewareLearnTotalScore":30,"courseMaterialsLearnGainScore":0,"courseMaterialsLearnTotalScore":15}}`
+	e := parseEnvelope(t, GetTasks(`{"platform":"qingshuxuetang","token":"tok"}`, courseJSON))
+	if !e.OK {
+		t.Fatalf("GetTasks failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res TaskListResult
+	json.Unmarshal(b, &res)
+	if len(res.Tasks) != 2 {
+		t.Fatalf("material tasks=%d, want 2", len(res.Tasks))
+	}
+	if res.Tasks[0].Type != "material" || res.Tasks[0].Raw["contentType"] != "12" || res.Tasks[0].Raw["contentId"] != "101" {
+		t.Fatalf("material task=%+v", res.Tasks[0])
+	}
+	if res.Tasks[1].Raw["contentId"] != "book-202" {
+		t.Fatalf("ebook task=%+v", res.Tasks[1])
 	}
 }
 
@@ -554,7 +709,54 @@ func TestRunTaskQsxt_SubmitHrNonZero(t *testing.T) {
 	}
 }
 
+func TestRunTaskQsxt_RejectsInvalidSubmitResponses(t *testing.T) {
+	for name, raw := range map[string]string{
+		"empty":        "",
+		"malformed":    "{",
+		"missing-data": `{"hr":0}`,
+		"rejected":     `{"hr":0,"data":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetState()
+			Init("/tmp/test")
+			restoreStart := fakeQsxtStart(`{"hr":0,"data":"record-1"}`, nil)
+			defer restoreStart()
+			restoreSubmit := fakeQsxtSubmit(raw, nil)
+			defer restoreSubmit()
+
+			e := parseEnvelope(t, RunTask(qsxtRunSessJSON, qsxtRunTaskJSON))
+			if e.OK {
+				t.Fatalf("submit response %q must fail", raw)
+			}
+		})
+	}
+}
+
 // --- host-driven action primitives ---
+
+func TestRunTaskQsxt_ActionScoreReturnsReferenceDimensions(t *testing.T) {
+	origScore := qsxtCourseScoreProvider
+	defer func() { qsxtCourseScoreProvider = origScore }()
+	restoreStart := fakeQsxtStart("", errors.New("start must not be called for action=score"))
+	defer restoreStart()
+	qsxtCourseScoreProvider = func(_, _, _, _, _ string) (string, error) {
+		return `{"hr":0,"data":{"rows":[{"id":879,"periodId":24,"usualScores":[{"type":2,"maxScore":30,"score":30},{"type":6,"maxScore":15,"score":3}]}]}}`, nil
+	}
+
+	resetState()
+	Init("/tmp/test")
+	taskJSON := `{"platform":"qingshuxuetang","id":"score:879","raw":{"classId":"45","courseId":"879","periodId":"24","schoolId":"114079"},"options":{"action":"score"}}`
+	e := parseEnvelope(t, RunTask(qsxtRunSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=score failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Raw["coursewareLearnGainScore"] != float64(30) || res.Raw["courseMaterialsLearnGainScore"] != float64(3) {
+		t.Fatalf("score raw=%v", res.Raw)
+	}
+}
 
 func TestRunTaskQsxt_ActionStart(t *testing.T) {
 	resetState()

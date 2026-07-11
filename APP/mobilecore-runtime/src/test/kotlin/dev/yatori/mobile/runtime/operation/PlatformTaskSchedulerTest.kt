@@ -104,6 +104,35 @@ class PlatformTaskSchedulerTest {
     }
 
     @Test
+    fun `qingshuxuetang task refreshes score after final study submission`() = runTest {
+        val session = SessionData("qingshuxuetang", "stu")
+        val task = TaskItem("content1", type = "video", platform = "qingshuxuetang", raw = JsonObject().apply {
+            addProperty("classId", "class1")
+            addProperty("courseId", "course1")
+            addProperty("periodId", "period1")
+            addProperty("schoolId", "school1")
+            addProperty("duration", 60)
+        })
+        gateway.results.add(RunTaskResult("qingshuxuetang", "content1", "started", raw = JsonObject().apply {
+            addProperty("serverRecordId", "record-1")
+        }))
+        gateway.results.add(RunTaskResult("qingshuxuetang", "content1", "submitted", raw = JsonObject().apply {
+            addProperty("serverRecordId", "record-1")
+            addProperty("position", 60)
+        }))
+        gateway.results.add(RunTaskResult("qingshuxuetang", "content1", "done", raw = JsonObject().apply {
+            addProperty("coursewareLearnGainScore", 30)
+            addProperty("coursewareLearnTotalScore", 30)
+        }))
+
+        val result = taskScheduler.runTask(session, task, PlatformTaskRunOptions(maxTicksPerTask = 10))
+
+        assertEquals(listOf("start", "end", "score"), gateway.options.map { it["action"] })
+        assertEquals(30.0, result.raw.get("coursewareLearnGainScore").asDouble)
+        assertEquals(listOf(60_000L), gateway.sleeps)
+    }
+
+    @Test
     fun `enaea mode zero skips learning without calling core`() = runTest {
         val result = taskScheduler.runTask(
             SessionData("enaea", "stu"),

@@ -117,6 +117,13 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `qingshuxuetang video mode preserves off and normal values`() {
+        assertEquals(0, qingshuxuetangVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
+        assertEquals(1, qingshuxuetangVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
+        assertEquals(1, qingshuxuetangVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 2) }))
+    }
+
+    @Test
     fun `ketangx video mode preserves off and normal values`() {
         assertEquals(0, ketangxVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
         assertEquals(1, ketangxVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))

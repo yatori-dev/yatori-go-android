@@ -80,6 +80,11 @@ fun CourseListScreen(container: AppContainer, nav: Navigator, platform: String, 
                     ) {
                         Text(c.name.ifBlank { c.id }, fontWeight = FontWeight.Medium, color = MiuixTheme.colorScheme.onSurface)
                         Text("进度 ${c.progress.toInt()}%", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        if (platform == "qingshuxuetang") {
+                            qingshuxuetangScoreSummary(c.raw)?.let { summary ->
+                                Text(summary, style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            }
+                        }
                     }
                 }
             }
@@ -219,4 +224,25 @@ fun CourseDetailScreen(container: AppContainer, nav: Navigator, platform: String
             }
         }
     }
+}
+
+internal fun qingshuxuetangScoreSummary(raw: com.google.gson.JsonObject): String? {
+    val keys = listOf(
+        "coursewareLearnGainScore",
+        "coursewareLearnTotalScore",
+        "courseWorkGainScore",
+        "courseWorkTotalScore",
+        "courseMaterialsLearnGainScore",
+        "courseMaterialsLearnTotalScore",
+    )
+    if (keys.none(raw::has)) return null
+
+    fun score(key: String): String {
+        val value = runCatching { raw.get(key)?.asDouble ?: 0.0 }.getOrDefault(0.0)
+        return if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
+    }
+
+    return "课件 ${score(keys[0])}/${score(keys[1])} · " +
+        "作业 ${score(keys[2])}/${score(keys[3])} · " +
+        "资料 ${score(keys[4])}/${score(keys[5])}"
 }

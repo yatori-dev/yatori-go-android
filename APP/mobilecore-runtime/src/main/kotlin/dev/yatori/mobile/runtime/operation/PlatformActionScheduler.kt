@@ -277,6 +277,11 @@ class PlatformActionScheduler(
         return result
     }
 
+    suspend fun refreshQingshuxuetangScore(session: SessionData, task: TaskItem): RunTaskResult {
+        require(session.platform == "qingshuxuetang") { "qingshuxuetang score requires a qingshuxuetang session" }
+        return repository.runTask(session, task, mapOf("action" to "score"))
+    }
+
     suspend fun prepareTtcdwProgress(session: SessionData, task: TaskItem): StoredActionState {
         val result = repository.runTask(session, task, mapOf("action" to "prepare"))
         return saveState(session, task, "ttcdw-progress", result, progress = jsonDouble(result.raw, "playProgress"), intervalSeconds = 30)

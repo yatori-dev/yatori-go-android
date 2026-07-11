@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	qsxtApi "github.com/yatori-dev/yatori-go-mobile-core/api/qingshuxuetang"
 )
@@ -105,6 +106,24 @@ var qsxtCoursesProvider = func(token string) (string, error) {
 	return cache.QsxtPullCourseApi(3, nil)
 }
 
+var qsxtCourseScoreProvider = func(token, periodID, classID, schoolID, courseID string) (string, error) {
+	cache := &qsxtApi.QsxtUserCache{Token: token}
+	return cache.QsxtPullCourseScoreApi(periodID, classID, schoolID, courseID, 3, nil)
+}
+
+func qsxtID(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case json.Number:
+		return v.String()
+	default:
+		return ""
+	}
+}
+
 func getCoursesQsxt(sess SessionData) (CourseListResult, error) {
 	raw, err := qsxtCoursesProvider(sess.Token)
 	if err != nil {
@@ -113,34 +132,109 @@ func getCoursesQsxt(sess SessionData) (CourseListResult, error) {
 	var resp struct {
 		HR   int `json:"hr"`
 		Data []struct {
-			ClassID    string  `json:"classId"`
-			CourseName string  `json:"courseName"`
-			Progress   float64 `json:"progress"`
-			SchoolName string  `json:"schoolName"`
-			SchoolID   string  `json:"schoolId"`
-			SemesterID string  `json:"semesterId"` // = periodId for detail API
-			CourseID   string  `json:"courseId"`
+			ClassID     interface{} `json:"classId"`
+			ProjectName string      `json:"name"`
+			SchoolName  string      `json:"schoolName"`
+			SchoolID    interface{} `json:"schoolId"`
+			Periods     []struct {
+				ID      interface{} `json:"id"`
+				Year    string      `json:"year"`
+				Name    string      `json:"name"`
+				Courses []struct {
+					ID              interface{} `json:"id"`
+					Name            string      `json:"name"`
+					StudyStatus     int         `json:"studyStatus"`
+					StudyStatusName string      `json:"studyStatusName"`
+					AllowLearn      bool        `json:"allowLearn"`
+				} `json:"courses"`
+			} `json:"periods"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&resp); err != nil {
 		return CourseListResult{}, fmt.Errorf("courses parse error: %w", err)
 	}
 	if resp.HR != 0 {
 		return CourseListResult{}, fmt.Errorf("courses request failed: %s", raw)
 	}
-	items := make([]CourseItem, 0, len(resp.Data))
-	for _, c := range resp.Data {
-		items = append(items, CourseItem{
-			ID:       c.ClassID,
-			Name:     c.CourseName,
-			Progress: c.Progress,
-			Raw: map[string]interface{}{
-				"schoolName": c.SchoolName,
-				"schoolId":   c.SchoolID,
-				"periodId":   c.SemesterID,
-				"courseId":   c.CourseID,
-			},
-		})
+	items := make([]CourseItem, 0)
+	for _, project := range resp.Data {
+		classID := qsxtID(project.ClassID)
+		schoolID := qsxtID(project.SchoolID)
+		for _, period := range project.Periods {
+			periodID := qsxtID(period.ID)
+			for _, course := range period.Courses {
+				courseID := qsxtID(course.ID)
+				scoreRaw, err := qsxtCourseScoreProvider(sess.Token, periodID, classID, schoolID, courseID)
+				if err != nil {
+					return CourseListResult{}, fmt.Errorf("qingshuxuetang: course score request failed: %w", err)
+				}
+				var scoreResp struct {
+					HR   int `json:"hr"`
+					Data struct {
+						Rows []struct {
+							ID          interface{} `json:"id"`
+							PeriodID    interface{} `json:"periodId"`
+							UsualScores []struct {
+								Type     int     `json:"type"`
+								MaxScore float64 `json:"maxScore"`
+								Score    float64 `json:"score"`
+							} `json:"usualScores"`
+						} `json:"rows"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(scoreRaw), &scoreResp); err != nil {
+					return CourseListResult{}, fmt.Errorf("qingshuxuetang: course score parse error: %w", err)
+				}
+				if scoreResp.HR != 0 {
+					return CourseListResult{}, fmt.Errorf("qingshuxuetang: course score request failed: %s", scoreRaw)
+				}
+				scores := map[string]float64{
+					"coursewareLearnGainScore":       0,
+					"coursewareLearnTotalScore":      0,
+					"courseWorkGainScore":            0,
+					"courseWorkTotalScore":           0,
+					"courseMaterialsLearnGainScore":  0,
+					"courseMaterialsLearnTotalScore": 0,
+				}
+				for _, row := range scoreResp.Data.Rows {
+					if qsxtID(row.ID) != courseID || qsxtID(row.PeriodID) != periodID {
+						continue
+					}
+					for _, score := range row.UsualScores {
+						switch score.Type {
+						case 2:
+							scores["coursewareLearnGainScore"] = score.Score
+							scores["coursewareLearnTotalScore"] = score.MaxScore
+						case 4:
+							scores["courseWorkGainScore"] = score.Score
+							scores["courseWorkTotalScore"] = score.MaxScore
+						case 6:
+							scores["courseMaterialsLearnGainScore"] = score.Score
+							scores["courseMaterialsLearnTotalScore"] = score.MaxScore
+						}
+					}
+				}
+				rawCourse := map[string]interface{}{
+					"classId":         classID,
+					"projectName":     project.ProjectName,
+					"schoolName":      project.SchoolName,
+					"schoolId":        schoolID,
+					"periodId":        periodID,
+					"semesterYear":    period.Year,
+					"semesterName":    period.Name,
+					"courseId":        courseID,
+					"studyStatus":     course.StudyStatus,
+					"studyStatusName": course.StudyStatusName,
+					"allowLearn":      course.AllowLearn,
+				}
+				for key, value := range scores {
+					rawCourse[key] = value
+				}
+				items = append(items, CourseItem{ID: classID, Name: course.Name, Raw: rawCourse})
+			}
+		}
 	}
 	return CourseListResult{Platform: "qingshuxuetang", Courses: items}, nil
 }
@@ -184,6 +278,16 @@ func getCourseDetailQsxt(sess SessionData, input CourseInput) (CourseDetailResul
 var qsxtNodeProvider = func(token, nodeUrl string) (string, error) {
 	cache := &qsxtApi.QsxtUserCache{Token: token}
 	return cache.QsxtPullNodeApi(nodeUrl, 3, nil)
+}
+
+var qsxtStudyRecordProvider = func(token, periodID, classID, schoolID, courseID string) (string, error) {
+	cache := &qsxtApi.QsxtUserCache{Token: token}
+	return cache.PullStudyRecordApi(periodID, classID, schoolID, courseID, 3, nil)
+}
+
+var qsxtMaterialsProvider = func(token, periodID, classID, schoolID, courseID string) (string, error) {
+	cache := &qsxtApi.QsxtUserCache{Token: token}
+	return cache.PullCourseMaterialsListApi(periodID, classID, schoolID, "1", "0", courseID, 5, nil)
 }
 
 // qsxtStartStudyProvider calls StartStudyApi; replaceable for tests.
@@ -234,6 +338,8 @@ var qsxtSaveAnswerProvider = func(token, answersJson string) (string, error) {
 // reusing the serverRecordId returned by "start".
 func runTaskQsxt(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	switch strOf(input.Options["action"]) {
+	case "score":
+		return qsxtScore(sess, input)
 	case "pullWork":
 		return qsxtPullWorkList(sess, input)
 	case "work", "exam":
@@ -375,12 +481,85 @@ func qsxtSubmitParsed(token, schoolId, serverRecordId string, position int, isEn
 		return fmt.Errorf("submit study time failed: %w", err)
 	}
 	var submitResp struct {
-		HR int `json:"hr"`
+		HR   int   `json:"hr"`
+		Data *bool `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(submitRaw), &submitResp); err == nil && submitResp.HR != 0 {
+	if err := json.Unmarshal([]byte(submitRaw), &submitResp); err != nil {
+		return fmt.Errorf("qingshuxuetang: submit study time returned invalid response: %w", err)
+	}
+	if submitResp.HR != 0 {
 		return fmt.Errorf("qingshuxuetang: submit study time failed")
 	}
+	if submitResp.Data == nil || !*submitResp.Data {
+		return fmt.Errorf("qingshuxuetang: submit study time rejected")
+	}
 	return nil
+}
+
+func qsxtScore(sess SessionData, input TaskInput) (RunTaskResult, error) {
+	classID := strOf(input.Raw["classId"])
+	periodID := strOf(input.Raw["periodId"])
+	schoolID := strOf(input.Raw["schoolId"])
+	courseID := strOf(input.Raw["courseId"])
+	if classID == "" || periodID == "" || schoolID == "" || courseID == "" {
+		return RunTaskResult{}, fmt.Errorf("qingshuxuetang: action=score requires raw.classId, periodId, schoolId, courseId")
+	}
+	raw, err := qsxtCourseScoreProvider(sess.Token, periodID, classID, schoolID, courseID)
+	if err != nil {
+		return RunTaskResult{}, fmt.Errorf("qingshuxuetang: course score request failed: %w", err)
+	}
+	var resp struct {
+		HR   int `json:"hr"`
+		Data struct {
+			Rows []struct {
+				ID          interface{} `json:"id"`
+				PeriodID    interface{} `json:"periodId"`
+				UsualScores []struct {
+					Type     int     `json:"type"`
+					MaxScore float64 `json:"maxScore"`
+					Score    float64 `json:"score"`
+				} `json:"usualScores"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return RunTaskResult{}, fmt.Errorf("qingshuxuetang: course score parse error: %w", err)
+	}
+	if resp.HR != 0 {
+		return RunTaskResult{}, fmt.Errorf("qingshuxuetang: course score request failed: %s", raw)
+	}
+	scores := map[string]interface{}{
+		"coursewareLearnGainScore":       float64(0),
+		"coursewareLearnTotalScore":      float64(0),
+		"courseWorkGainScore":            float64(0),
+		"courseWorkTotalScore":           float64(0),
+		"courseMaterialsLearnGainScore":  float64(0),
+		"courseMaterialsLearnTotalScore": float64(0),
+	}
+	for _, row := range resp.Data.Rows {
+		if qsxtID(row.ID) != courseID || qsxtID(row.PeriodID) != periodID {
+			continue
+		}
+		for _, score := range row.UsualScores {
+			switch score.Type {
+			case 2:
+				scores["coursewareLearnGainScore"] = score.Score
+				scores["coursewareLearnTotalScore"] = score.MaxScore
+			case 4:
+				scores["courseWorkGainScore"] = score.Score
+				scores["courseWorkTotalScore"] = score.MaxScore
+			case 6:
+				scores["courseMaterialsLearnGainScore"] = score.Score
+				scores["courseMaterialsLearnTotalScore"] = score.MaxScore
+			}
+		}
+	}
+	return RunTaskResult{
+		Platform: "qingshuxuetang",
+		TaskID:   input.ID,
+		Status:   "done",
+		Raw:      scores,
+	}, nil
 }
 
 // qsxtPullWorkList (options.action="pullWork") lists a course's works/exams so the
@@ -572,23 +751,90 @@ func qsxtRunWork(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	}, nil
 }
 
-// getTasksQsxt returns the node list for a qingshuxuetang course.
-// Priority: raw.coursewareUrl (from GetCourseDetail) > raw.nodeUrl (legacy compat).
+type qsxtTreeNode struct {
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	Duration   int            `json:"duration"`
+	IsComplete string         `json:"iscomplete"`
+	Nodes      []qsxtTreeNode `json:"nodes"`
+}
+
+func qsxtFlattenTasks(nodes []qsxtTreeNode, context map[string]interface{}, out *[]TaskItem) {
+	for _, node := range nodes {
+		if node.Type != "chapter" {
+			durationSeconds := node.Duration / 1000
+			if durationSeconds == 0 {
+				durationSeconds = 350
+			}
+			raw := make(map[string]interface{}, len(context)+5)
+			for key, value := range context {
+				raw[key] = value
+			}
+			raw["nodeId"] = node.ID
+			raw["contentId"] = node.ID
+			raw["contentType"] = "11"
+			raw["duration"] = durationSeconds
+			raw["durationMs"] = node.Duration
+			status := "not_started"
+			if node.IsComplete == "已完成" {
+				status = "done"
+			}
+			*out = append(*out, TaskItem{ID: node.ID, Name: node.Name, Type: node.Type, Status: status, Raw: raw})
+		}
+		qsxtFlattenTasks(node.Nodes, context, out)
+	}
+}
+
+// getTasksQsxt resolves the detail URL when necessary and flattens the recursive
+// courseware tree returned by the reference API.
 func getTasksQsxt(sess SessionData, input CourseInput) (TaskListResult, error) {
-	nodeUrl := strOf(input.Raw["coursewareUrl"])
-	if nodeUrl == "" {
-		nodeUrl = strOf(input.Raw["nodeUrl"]) // legacy fallback
+	classID := strOf(input.Raw["classId"])
+	if classID == "" {
+		classID = input.ID
 	}
-	if nodeUrl == "" {
-		return TaskListResult{}, fmt.Errorf("qingshuxuetang: courseJSON.raw.coursewareUrl is required (returned by GetCourseDetail)")
+	periodID := strOf(input.Raw["periodId"])
+	if periodID == "" {
+		periodID = strOf(input.Raw["semesterId"])
 	}
-	raw, err := qsxtNodeProvider(sess.Token, nodeUrl)
+	schoolID := strOf(input.Raw["schoolId"])
+	courseID := strOf(input.Raw["courseId"])
+	hasCourseContext := classID != "" && periodID != "" && schoolID != "" && courseID != ""
+
+	nodeURL := strOf(input.Raw["coursewareUrl"])
+	if nodeURL == "" {
+		nodeURL = strOf(input.Raw["nodeUrl"])
+	}
+	if nodeURL == "" {
+		if !hasCourseContext {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: courseJSON.raw must include coursewareUrl (or classId, schoolId, periodId, courseId)")
+		}
+		detailRaw, err := qsxtCourseDetailProvider(sess.Token, periodID, classID, schoolID, courseID)
+		if err != nil {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course detail request failed: %w", err)
+		}
+		var detail struct {
+			HR   int `json:"hr"`
+			Data struct {
+				CoursewareURL string `json:"coursewareUrl"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(detailRaw), &detail); err != nil {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course detail parse error: %w", err)
+		}
+		if detail.HR != 0 || detail.Data.CoursewareURL == "" {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course detail missing coursewareUrl")
+		}
+		nodeURL = detail.Data.CoursewareURL
+	}
+
+	raw, err := qsxtNodeProvider(sess.Token, nodeURL)
 	if err != nil {
 		return TaskListResult{}, err
 	}
 	var resp struct {
-		HR   int                      `json:"hr"`
-		Data []map[string]interface{} `json:"data"`
+		HR   int             `json:"hr"`
+		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		return TaskListResult{}, fmt.Errorf("node list parse error: %w", err)
@@ -596,15 +842,116 @@ func getTasksQsxt(sess SessionData, input CourseInput) (TaskListResult, error) {
 	if resp.HR != 0 {
 		return TaskListResult{}, fmt.Errorf("node list request failed: %s", raw)
 	}
-	tasks := make([]TaskItem, 0, len(resp.Data))
-	for _, n := range resp.Data {
-		id, _ := n["id"].(string)
-		name, _ := n["name"].(string)
-		status := "not_started"
-		if isComplete, _ := n["iscomplete"].(string); isComplete == "已完成" {
-			status = "done"
+	var nodes []qsxtTreeNode
+	if len(resp.Data) > 0 && resp.Data[0] == '[' {
+		if err := json.Unmarshal(resp.Data, &nodes); err != nil {
+			return TaskListResult{}, fmt.Errorf("node list parse error: %w", err)
 		}
-		tasks = append(tasks, TaskItem{ID: id, Name: name, Status: status, Raw: n})
+	} else {
+		var data struct {
+			Nodes []qsxtTreeNode `json:"nodes"`
+		}
+		if err := json.Unmarshal(resp.Data, &data); err != nil {
+			return TaskListResult{}, fmt.Errorf("node list parse error: %w", err)
+		}
+		nodes = data.Nodes
+	}
+	context := map[string]interface{}{
+		"classId": classID, "schoolId": schoolID, "periodId": periodID, "courseId": courseID,
+	}
+	tasks := make([]TaskItem, 0)
+	qsxtFlattenTasks(nodes, context, &tasks)
+	if !hasCourseContext {
+		return TaskListResult{Platform: "qingshuxuetang", ParentID: input.ID, Tasks: tasks}, nil
+	}
+
+	recordRaw, err := qsxtStudyRecordProvider(sess.Token, periodID, classID, schoolID, courseID)
+	if err != nil {
+		return TaskListResult{}, fmt.Errorf("qingshuxuetang: study record request failed: %w", err)
+	}
+	var records struct {
+		HR   int `json:"hr"`
+		Data []struct {
+			ContentID          string `json:"contentId"`
+			TotalStudyDuration int    `json:"totalstudyDuration"`
+			StudyTimes         int    `json:"studyTimes"`
+			LastStudyTime      int    `json:"lastStudyTime"`
+			MaxStudyPosition   int    `json:"maxStudyPosition"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(recordRaw), &records); err != nil {
+		return TaskListResult{}, fmt.Errorf("qingshuxuetang: study record parse error: %w", err)
+	}
+	if records.HR != 0 {
+		return TaskListResult{}, fmt.Errorf("qingshuxuetang: study record request failed: %s", recordRaw)
+	}
+	byID := make(map[string]int, len(tasks))
+	for index := range tasks {
+		byID[tasks[index].ID] = index
+	}
+	for _, record := range records.Data {
+		index, ok := byID[record.ContentID]
+		if !ok {
+			continue
+		}
+		task := &tasks[index]
+		task.Raw["totalStudyDuration"] = record.TotalStudyDuration
+		task.Raw["studyTimes"] = record.StudyTimes
+		task.Raw["lastStudyTime"] = record.LastStudyTime
+		task.Raw["maxStudyPosition"] = record.MaxStudyPosition
+		duration := optInt(task.Raw["duration"], 0)
+		if record.TotalStudyDuration > duration {
+			task.Status = "done"
+		} else if record.TotalStudyDuration > 0 {
+			task.Status = "in_progress"
+		}
+	}
+
+	materialTotalRaw, hasMaterialScore := input.Raw["courseMaterialsLearnTotalScore"]
+	materialGain := optInt(input.Raw["courseMaterialsLearnGainScore"], 0)
+	materialTotal := optInt(materialTotalRaw, 0)
+	if hasMaterialScore && materialGain < materialTotal {
+		materialsRaw, err := qsxtMaterialsProvider(sess.Token, periodID, classID, schoolID, courseID)
+		if err != nil {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course materials request failed: %w", err)
+		}
+		var materialsResp struct {
+			HR   int `json:"hr"`
+			Data struct {
+				Materials []struct {
+					ID   interface{} `json:"id"`
+					Name string      `json:"name"`
+				} `json:"materials"`
+				Ebooks []struct {
+					ID     interface{} `json:"id"`
+					BookID string      `json:"bookId"`
+					Name   string      `json:"name"`
+				} `json:"ebooks"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(materialsRaw), &materialsResp); err != nil {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course materials parse error: %w", err)
+		}
+		if materialsResp.HR != 0 {
+			return TaskListResult{}, fmt.Errorf("qingshuxuetang: course materials request failed: %s", materialsRaw)
+		}
+		appendMaterial := func(id, contentID, name string) {
+			raw := map[string]interface{}{
+				"classId": classID, "schoolId": schoolID, "periodId": periodID, "courseId": courseID,
+				"contentId": contentID, "contentType": "12", "materialId": id,
+				"courseMaterialsLearnGainScore":  materialGain,
+				"courseMaterialsLearnTotalScore": materialTotal,
+			}
+			tasks = append(tasks, TaskItem{ID: "material:" + id, Name: name, Type: "material", Status: "not_started", Raw: raw})
+		}
+		for _, material := range materialsResp.Data.Materials {
+			id := qsxtID(material.ID)
+			appendMaterial(id, id, material.Name)
+		}
+		for _, ebook := range materialsResp.Data.Ebooks {
+			id := qsxtID(ebook.ID)
+			appendMaterial(id, ebook.BookID, ebook.Name)
+		}
 	}
 	return TaskListResult{Platform: "qingshuxuetang", ParentID: input.ID, Tasks: tasks}, nil
 }

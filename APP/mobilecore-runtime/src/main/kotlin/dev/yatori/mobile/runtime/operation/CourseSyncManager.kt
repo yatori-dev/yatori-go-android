@@ -114,6 +114,7 @@ class CourseSyncManager(
     /** Haiqikeji learning modes operate on video nodes; work/exam stay opt-in answer tasks. */
     private fun shouldRunFlatTask(session: SessionData, task: TaskItem, plan: RunPlan): Boolean {
         if (session.platform == "enaea") return plan.enaeaVideoModel != 0
+        if (session.platform == "qingshuxuetang") return plan.qingshuxuetangVideoModel != 0
         if (session.platform == "ketangx") return plan.ketangxVideoModel != 0
         if (session.platform != "haiqikeji") return true
         if (task.type.equals("video", ignoreCase = true)) return plan.haiqikejiVideoModel != 0
@@ -218,6 +219,17 @@ class CourseSyncManager(
                 return submitted
             }
 
+            if (session.platform == "qingshuxuetang") {
+                if (plan.qingshuxuetangVideoModel != 0) {
+                    submitted.addAll(runQingshuxuetangCourses(session, plan, opId, courses, emit))
+                }
+                controller.markDone(
+                    opId,
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
+                )
+                return submitted
+            }
+
             if (session.platform == "ketangx") {
                 if (plan.ketangxVideoModel != 0) {
                     submitted.addAll(runKetangxCourses(session, plan, opId, courses, emit))
@@ -287,6 +299,85 @@ class CourseSyncManager(
             throw e
         }
         return submitted
+    }
+
+    /** Console parity: courses and nodes stay sequential; refreshed scores gate remaining nodes by category. */
+    private suspend fun runQingshuxuetangCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val submitted = mutableListOf<String>()
+        var completed = 0
+        var total = 0
+        controller.updateProgress(opId, completed = 0, total = 0, detail = "正在拉取课程节点")
+        for (course in courses) {
+            if (controller.isCancelling(opId)) break
+            val studyStatusName = runCatching { course.raw.get("studyStatusName")?.asString.orEmpty() }.getOrDefault("")
+            if (studyStatusName.isNotBlank() && studyStatusName != "在修") {
+                onEvent(SyncEvent("info", "${course.name.ifBlank { course.id }}：非在修课程，跳过", session.platform))
+                continue
+            }
+            val tasks = try {
+                runner.getTasks(session, course)
+                    .filter { !it.isFinished() && it.id !in plan.completedTaskIds }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e.isSessionExpiredError()) throw e
+                onEvent(SyncEvent("error", "${course.name.ifBlank { course.id }} 拉取节点失败：${e.message}", session.platform))
+                continue
+            }
+            total += tasks.size
+            controller.updateProgress(opId, completed = completed, total = total, detail = "已发现 $total 个任务")
+            val scores = course.raw.deepCopy()
+            for (task in tasks) {
+                if (controller.isCancelling(opId)) break
+                if (qingshuxuetangScoreComplete(scores, task)) {
+                    completed += 1
+                    onEvent(SyncEvent("info", "${course.name}／${task.name}：该类别已满分，跳过", session.platform))
+                    controller.updateProgress(opId, completed = completed, total = total, detail = task.name.ifBlank { task.id })
+                    continue
+                }
+                try {
+                    val result = runOneTask(session, task, plan, opId, onEvent)
+                    if (result.isSubmittedOrDone()) submitted.add(task.id)
+                    mergeQingshuxuetangScores(scores, result.raw)
+                    onEvent(SyncEvent("info", "${course.name}／${task.name}：${result.status}", session.platform))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    if (e.isSessionExpiredError()) throw e
+                    onEvent(SyncEvent("error", "${course.name}／${task.name} 失败：${e.message}", session.platform))
+                } finally {
+                    completed += 1
+                    controller.updateProgress(opId, completed = completed, total = total, detail = task.name.ifBlank { task.id })
+                }
+            }
+        }
+        return submitted
+    }
+
+    private fun qingshuxuetangScoreComplete(scores: JsonObject, task: TaskItem): Boolean {
+        val material = task.type.equals("material", ignoreCase = true)
+        val gainKey = if (material) "courseMaterialsLearnGainScore" else "coursewareLearnGainScore"
+        val totalKey = if (material) "courseMaterialsLearnTotalScore" else "coursewareLearnTotalScore"
+        val gain = runCatching { scores.get(gainKey)?.asDouble ?: 0.0 }.getOrDefault(0.0)
+        val target = runCatching { scores.get(totalKey)?.asDouble ?: 0.0 }.getOrDefault(0.0)
+        return target > 0.0 && gain >= target
+    }
+
+    private fun mergeQingshuxuetangScores(target: JsonObject, source: JsonObject) {
+        listOf(
+            "coursewareLearnGainScore",
+            "coursewareLearnTotalScore",
+            "courseWorkGainScore",
+            "courseWorkTotalScore",
+            "courseMaterialsLearnGainScore",
+            "courseMaterialsLearnTotalScore",
+        ).forEach { key -> source.get(key)?.let { target.add(key, it.deepCopy()) } }
     }
 
     /** Console parity: independent courses run concurrently; nodes inside one course stay ordered. */
@@ -1005,12 +1096,13 @@ class CourseSyncManager(
                 options = PlatformTaskRunOptions(
                     dryRun = plan.dryRun,
                     videoModel = when (session.platform) {
-                        "haiqikeji" -> plan.haiqikejiVideoModel
-                        "enaea"     -> plan.enaeaVideoModel
-                        "yinghua"   -> plan.yinghuaVideoModel
-                        "welearn"   -> plan.welearnVideoModel
-                        "cqie"      -> plan.cqieVideoModel
-                        else        -> 1
+                        "haiqikeji"       -> plan.haiqikejiVideoModel
+                        "qingshuxuetang"  -> plan.qingshuxuetangVideoModel
+                        "enaea"           -> plan.enaeaVideoModel
+                        "yinghua"         -> plan.yinghuaVideoModel
+                        "welearn"         -> plan.welearnVideoModel
+                        "cqie"            -> plan.cqieVideoModel
+                        else              -> 1
                     },
                 ),
                 shouldCancel = { controller.isCancelling(opId) },

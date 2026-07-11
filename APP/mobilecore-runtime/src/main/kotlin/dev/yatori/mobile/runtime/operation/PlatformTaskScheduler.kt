@@ -290,7 +290,9 @@ class PlatformTaskScheduler(
         var last = RunTaskResult(session.platform, task.id, "started")
         for (i in 1..ticks) {
             if (shouldCancel()) return last
-            sleepBeforeTick(i, 60)
+            // Console waits 60 s before every submission, including the first one.
+            sleepMillis(60_000L)
+            if (shouldCancel()) return last
             val position = min(total, i * 60)
             last = actions.tickQingshuxuetangProgress(
                 session,
@@ -299,7 +301,8 @@ class PlatformTaskScheduler(
             )
             onEvent(tickEvent(session.platform, task, i, ticks, percent(i, ticks)))
         }
-        return last
+        if (shouldCancel()) return last
+        return actions.refreshQingshuxuetangScore(session, task)
     }
 
     private suspend fun runTtcdw(

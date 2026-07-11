@@ -251,6 +251,14 @@ class PlatformActionSchedulerTest {
         assertEquals("continue", gateway.lastOptions["action"])
         assertEquals(60, gateway.lastOptions["position"])
         assertEquals("record-1", gateway.lastTask.raw.get("serverRecordId").asString)
+
+        gateway.runTaskResult = RunTaskResult("qingshuxuetang", "content1", "done", raw = JsonObject().apply {
+            addProperty("coursewareLearnGainScore", 10)
+            addProperty("coursewareLearnTotalScore", 30)
+        })
+        val score = scheduler.refreshQingshuxuetangScore(session, task)
+        assertEquals("score", gateway.lastOptions["action"])
+        assertEquals(10.0, score.raw.get("coursewareLearnGainScore").asDouble)
     }
 
     @Test

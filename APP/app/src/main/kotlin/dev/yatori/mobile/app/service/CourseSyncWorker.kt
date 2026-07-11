@@ -76,6 +76,7 @@ class CourseSyncWorker(
             answerPolicy = answerPolicyFromSavedConfig(container, platform, account),
             xuexitong = xuexitongOptionsFromSavedConfig(container, platform, account),
             haiqikejiVideoModel = haiqikejiVideoModelFromSavedConfig(container, platform, account),
+            qingshuxuetangVideoModel = qingshuxuetangVideoModelFromSavedConfig(container, platform, account),
             ketangxVideoModel = ketangxVideoModelFromSavedConfig(container, platform, account),
             enaeaVideoModel = enaeaVideoModelFromSavedConfig(container, platform, account),
             yinghuaVideoModel = yinghuaVideoModelFromSavedConfig(container, platform, account),
@@ -355,6 +356,18 @@ internal fun haiqikejiVideoModelFromSavedConfig(container: AppContainer, platfor
 
 internal fun haiqikejiVideoModelFromCoursesCustom(cc: JsonObject): Int =
     cc.int("videoModel", 1).takeIf { it in 0..2 } ?: 1
+
+internal fun qingshuxuetangVideoModelFromSavedConfig(container: AppContainer, platform: String, account: String): Int {
+    if (platform != "qingshuxuetang") return 1
+    val user = container.repository.loadSavedConfig()?.users?.firstOrNull {
+        it.str("account").equals(account, ignoreCase = false) &&
+            it.str("accountType").equals(platform, ignoreCase = true)
+    } ?: return 1
+    return qingshuxuetangVideoModelFromCoursesCustom(user.obj("coursesCustom"))
+}
+
+internal fun qingshuxuetangVideoModelFromCoursesCustom(cc: JsonObject): Int =
+    cc.int("videoModel", 1).takeIf { it in 0..1 } ?: 1
 
 internal fun ketangxVideoModelFromSavedConfig(container: AppContainer, platform: String, account: String): Int {
     if (platform != "ketangx") return 1

@@ -171,8 +171,7 @@ func (cache *QsxtUserCache) QsxtPullNodeApi(urlStr string, retry int, lastErr er
 	req, err := http.NewRequest(method, urlStr, nil)
 
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", err
 	}
 	req.Header.Add("User-Agent", "okhttp/4.2.2")
 	req.Header.Add("Connection", "Keep-Alive")
@@ -185,15 +184,17 @@ func (cache *QsxtUserCache) QsxtPullNodeApi(urlStr string, retry int, lastErr er
 
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", err
+	}
+	if res.StatusCode != http.StatusOK {
+		res.Body.Close()
+		return "", errors.New(res.Status)
 	}
 	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		fmt.Println(err)
-		return "", nil
+		return "", err
 	}
 
 	return string(body), nil
