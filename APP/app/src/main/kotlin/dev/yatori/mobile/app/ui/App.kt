@@ -86,6 +86,23 @@ import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.coroutines.cancellation.CancellationException
 
+internal data class TabPageTransitionTarget(val offsetPages: Float, val alpha: Float)
+
+internal fun tabPageTransitionTarget(
+    pageIndex: Int,
+    selectedIndex: Int,
+    anim: PageAnim,
+): TabPageTransitionTarget = when (anim) {
+    PageAnim.SLIDE -> TabPageTransitionTarget(
+        offsetPages = (pageIndex - selectedIndex).toFloat(),
+        alpha = 1f,
+    )
+    PageAnim.FADE -> TabPageTransitionTarget(
+        offsetPages = 0f,
+        alpha = if (pageIndex == selectedIndex) 1f else 0f,
+    )
+}
+
 @Composable
 fun YatoriApp(
     container: AppContainer,
@@ -204,22 +221,39 @@ fun YatoriApp(
                         modifier = Modifier.fillMaxSize()
                             .let { if (blurActive) it.layerBackdrop(contentBackdrop) else it },
                     ) {
-                        Tab.entries.forEach { tab ->
+                        Tab.entries.forEachIndexed { pageIndex, tab ->
                             val isActive = tab == nav.tab
+                            val target = tabPageTransitionTarget(
+                                pageIndex = pageIndex,
+                                selectedIndex = nav.tab.ordinal,
+                                anim = themeState.tabAnim,
+                            )
                             val alpha = if (themeState.tabAnim == PageAnim.FADE) {
                                 animateFloatAsState(
-                                    targetValue = if (isActive) 1f else 0f,
+                                    targetValue = target.alpha,
                                     animationSpec = tween(150),
                                     label = "tab_alpha_${tab.name}",
                                 ).value
                             } else {
-                                if (isActive) 1f else 0f
+                                target.alpha
+                            }
+                            val offsetPages = if (themeState.tabAnim == PageAnim.SLIDE) {
+                                animateFloatAsState(
+                                    targetValue = target.offsetPages,
+                                    animationSpec = tween(300),
+                                    label = "tab_offset_${tab.name}",
+                                ).value
+                            } else {
+                                target.offsetPages
                             }
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .zIndex(if (isActive) 1f else 0f)
-                                    .graphicsLayer { this.alpha = alpha },
+                                    .graphicsLayer {
+                                        this.alpha = alpha
+                                        translationX = offsetPages * size.width
+                                    },
                             ) {
                                 tabContent[tab]?.invoke(bp, isActive)
                             }
