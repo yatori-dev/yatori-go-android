@@ -233,7 +233,7 @@ func TestGetTasksWelearn_Success(t *testing.T) {
 		t.Fatalf("task[0].status=%q, want done", res.Tasks[0].Status)
 	}
 	raw := res.Tasks[0].Raw
-	for _, f := range []string{"cid", "uid", "classId", "scoId", "crate"} {
+	for _, f := range []string{"cid", "uid", "classId", "scoId", "crate", "isVisible"} {
 		if _, ok := raw[f]; !ok {
 			t.Errorf("task Raw missing %q", f)
 		}
@@ -244,10 +244,10 @@ func TestGetTasksWelearn_MissingFields(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	cases := []string{
-		`{"platform":"welearn","id":"ch1","raw":{"uid":"u1","classId":"cl1","unitIdx":0}}`,        // no cid
-		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","classId":"cl1","unitIdx":0}}`,        // no uid
-		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","uid":"u1","unitIdx":0}}`,             // no classId
-		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","uid":"u1","classId":"cl1"}}`,         // no unitIdx
+		`{"platform":"welearn","id":"ch1","raw":{"uid":"u1","classId":"cl1","unitIdx":0}}`, // no cid
+		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","classId":"cl1","unitIdx":0}}`, // no uid
+		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","uid":"u1","unitIdx":0}}`,      // no classId
+		`{"platform":"welearn","id":"ch1","raw":{"cid":"c1","uid":"u1","classId":"cl1"}}`,  // no unitIdx
 	}
 	for i, cj := range cases {
 		e := parseEnvelope(t, GetTasks(welearnSessJSON, cj))
@@ -364,10 +364,10 @@ func TestRunTaskWelearn_MissingFields(t *testing.T) {
 	resetState()
 	Init("/tmp/test")
 	cases := []string{
-		`{"platform":"welearn","raw":{"cid":"c1","uid":"u1","classId":"cl1"}}`,  // no scoId
-		`{"platform":"welearn","id":"p1","raw":{"uid":"u1","classId":"cl1"}}`,   // no cid
-		`{"platform":"welearn","id":"p1","raw":{"cid":"c1","classId":"cl1"}}`,   // no uid
-		`{"platform":"welearn","id":"p1","raw":{"cid":"c1","uid":"u1"}}`,        // no classId
+		`{"platform":"welearn","raw":{"cid":"c1","uid":"u1","classId":"cl1"}}`, // no scoId
+		`{"platform":"welearn","id":"p1","raw":{"uid":"u1","classId":"cl1"}}`,  // no cid
+		`{"platform":"welearn","id":"p1","raw":{"cid":"c1","classId":"cl1"}}`,  // no uid
+		`{"platform":"welearn","id":"p1","raw":{"cid":"c1","uid":"u1"}}`,       // no classId
 	}
 	for i, tj := range cases {
 		e := parseEnvelope(t, RunTask(welearnSessJSON, tj))
@@ -449,5 +449,26 @@ func TestRunTaskWelearn_ActionFinalize(t *testing.T) {
 	json.Unmarshal(b, &res)
 	if res.Status != "submitted" {
 		t.Fatalf("expected submitted, got %q", res.Status)
+	}
+}
+
+func TestRunTaskWelearn_ActionStartReturnsServerScormBaseline(t *testing.T) {
+	resetState()
+	Init("/tmp/test")
+	restoreSubmit := fakeWelearnSubmitTime(`{"ret":0,"comment":"{\"cmi\":{\"session_time\":120,\"total_time\":300,\"progress_measure\":\"40\",\"score\":{\"scaled\":\"88\"}}}"}`, nil)
+	defer restoreSubmit()
+	restoreStart := fakeWelearnStart(`{"ret":0}`, nil)
+	defer restoreStart()
+
+	taskJSON := `{"platform":"welearn","id":"p1","raw":{"cid":"c1","uid":"u1","classId":"cl1","crate":"100"},"options":{"action":"start"}}`
+	e := parseEnvelope(t, RunTask(welearnSessJSON, taskJSON))
+	if !e.OK {
+		t.Fatalf("action=start failed: %s", e.Error)
+	}
+	b, _ := json.Marshal(e.Data)
+	var res RunTaskResult
+	json.Unmarshal(b, &res)
+	if res.Raw["sessionTime"] != float64(120) || res.Raw["totalTime"] != float64(300) || res.Raw["progressMeasure"] != float64(40) || res.Raw["scaled"] != "88" {
+		t.Fatalf("raw=%v, want server SCORM baseline", res.Raw)
 	}
 }

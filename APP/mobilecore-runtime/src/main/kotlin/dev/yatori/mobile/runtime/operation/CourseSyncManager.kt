@@ -241,6 +241,17 @@ class CourseSyncManager(
                 return submitted
             }
 
+            if (session.platform == "welearn") {
+                if (plan.welearnVideoModel != 0) {
+                    submitted.addAll(runWelearnCourses(session, plan, opId, courses, emit))
+                }
+                controller.markDone(
+                    opId,
+                    detail = if (controller.isCancelling(opId)) "已取消，已提交 ${submitted.size} 个" else "已完成，已提交 ${submitted.size} 个",
+                )
+                return submitted
+            }
+
             data class Pending(val course: CourseItem, val task: TaskItem)
             val pending = ArrayList<Pending>()
             for (course in courses) {
@@ -297,6 +308,51 @@ class CourseSyncManager(
             emit(SyncEvent("error", "课程同步失败：${e.message}", plan.platform))
             controller.markFailed(opId, detail = e.message ?: "failed")
             throw e
+        }
+        return submitted
+    }
+
+    private suspend fun runWelearnCourses(
+        session: SessionData,
+        plan: RunPlan,
+        opId: String,
+        courses: List<CourseItem>,
+        onEvent: (SyncEvent) -> Unit,
+    ): List<String> {
+        val failures = Collections.synchronizedList(mutableListOf<Throwable>())
+        val submitted = coroutineScope {
+            courses.map { course ->
+                async {
+                    val courseSubmitted = mutableListOf<String>()
+                    try {
+                        for (chapter in runner.getCourseDetail(session, course)) {
+                            for (task in runner.getTasks(session, chapter)) {
+                                if (controller.isCancelling(opId)) break
+                                val visible = runCatching {
+                                    !task.raw.has("isVisible") || task.raw.get("isVisible").asBoolean
+                                }.getOrDefault(true)
+                                if (!visible) {
+                                    onEvent(SyncEvent("info", "${course.name}／${task.name}：任务点未解锁，跳过", session.platform))
+                                    continue
+                                }
+                                if (plan.welearnVideoModel == 2 && (task.isFinished() || task.id in plan.completedTaskIds)) continue
+                                val result = runOneTask(session, task, plan, opId, onEvent)
+                                if (result.isSubmittedOrDone()) courseSubmitted.add(task.id)
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        if (e.isSessionExpiredError()) throw e
+                        failures.add(e)
+                        onEvent(SyncEvent("error", "${course.name} 失败：${e.message}", session.platform))
+                    }
+                    courseSubmitted
+                }
+            }.awaitAll().flatten()
+        }
+        if (failures.isNotEmpty()) {
+            throw IllegalStateException("welearn: ${failures.size} course/task operations failed", failures.first())
         }
         return submitted
     }
@@ -1104,6 +1160,7 @@ class CourseSyncManager(
                         "cqie"            -> plan.cqieVideoModel
                         else              -> 1
                     },
+                    welearnStudyTimeRange = plan.welearnStudyTimeRange,
                 ),
                 shouldCancel = { controller.isCancelling(opId) },
                 onEvent = onEvent,

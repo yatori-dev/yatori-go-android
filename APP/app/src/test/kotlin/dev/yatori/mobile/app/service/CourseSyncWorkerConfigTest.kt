@@ -147,6 +147,14 @@ class CourseSyncWorkerConfigTest {
     }
 
     @Test
+    fun `welearn video mode preserves off time and completion values`() {
+        assertEquals(0, welearnVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 0) }))
+        assertEquals(1, welearnVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 1) }))
+        assertEquals(2, welearnVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 2) }))
+        assertEquals(1, welearnVideoModelFromCoursesCustom(JsonObject().apply { addProperty("videoModel", 9) }))
+    }
+
+    @Test
     fun `enaea saved course paths use project category matching`() {
         val rule = courseSelectionRuleFromCoursesCustom(
             "enaea",

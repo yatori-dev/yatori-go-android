@@ -2271,4 +2271,47 @@ class CourseSyncManagerTest {
         fun arr(vararg values: JsonObject): JsonArray = JsonArray().apply { values.forEach(::add) }
         fun arr(vararg values: String): JsonArray = JsonArray().apply { values.forEach(::add) }
     }
+
+    @Test
+    fun `welearn expands chapters before loading and running points`() = runTest {
+        val course = CourseItem("c1", name = "course", platform = "welearn")
+        val chapter = CourseItem("ch1", name = "chapter", platform = "welearn", raw = JsonObject().apply {
+            addProperty("unitIdx", 0)
+        })
+        val point = TaskItem("p1", name = "point", platform = "welearn")
+        val calls = mutableListOf<String>()
+        val runner = object : CourseTaskRunner {
+            override suspend fun getCourses(session: SessionData) = listOf(course)
+            override suspend fun getCourseDetail(session: SessionData, course: CourseItem): List<CourseItem> {
+                calls += "detail:${course.id}"
+                return listOf(chapter)
+            }
+            override suspend fun getTasks(session: SessionData, course: CourseItem): List<TaskItem> {
+                calls += "tasks:${course.id}"
+                check(course.raw.has("unitIdx")) { "welearn tasks require chapter unitIdx" }
+                return listOf(point)
+            }
+            override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>) =
+                error("platform runner should own welearn")
+        }
+        val platform = object : PlatformTaskRunner {
+            override fun supports(session: SessionData, task: TaskItem) = session.platform == "welearn"
+            override suspend fun runTask(
+                session: SessionData,
+                task: TaskItem,
+                options: PlatformTaskRunOptions,
+                shouldCancel: () -> Boolean,
+                onEvent: (SyncEvent) -> Unit,
+            ): RunTaskResult {
+                calls += "run:${task.id}"
+                return RunTaskResult("welearn", task.id, "submitted")
+            }
+        }
+
+        val submitted = CourseSyncManager(runner, OperationController(now = { 0L }), platform)
+            .run(SessionData("welearn", "stu"), RunPlan("wl", "welearn", "stu"))
+
+        assertEquals(listOf("detail:c1", "tasks:ch1", "run:p1"), calls)
+        assertEquals(listOf("p1"), submitted)
+    }
 }

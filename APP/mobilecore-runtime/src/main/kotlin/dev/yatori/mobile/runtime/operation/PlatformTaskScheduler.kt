@@ -17,6 +17,7 @@ data class PlatformTaskRunOptions(
     val maxTicksPerTask: Int = 240,
     /** 1 = normal (30 s incremental, sequential), 2 = fast (submit 100 % once, matches console fastModeAction). */
     val videoModel: Int = 1,
+    val welearnStudyTimeRange: String = "",
 )
 
 interface PlatformTaskRunner {
@@ -162,37 +163,64 @@ class PlatformTaskScheduler(
         shouldCancel: () -> Boolean,
         onEvent: (SyncEvent) -> Unit,
     ): RunTaskResult {
-        // Mode 2: one-shot complete (mirrors console nodeCompleteAction / WeLearnCompletePointAction).
+        if (options.videoModel == 0) {
+            return RunTaskResult(session.platform, task.id, "skipped", "video learning disabled")
+        }
         if (options.videoModel == 2) {
             val result = actions.completeWelearnPoint(session, task)
             onEvent(tickEvent(session.platform, task, 1, 1, 100))
             return result
         }
-        // Mode 1: SCORM time-accumulation loop, 60 s ticks (mirrors console nodeSubmitTimeAction).
-        actions.startWelearnProgress(session, task)
-        val totalTime = durationSeconds(task.raw, "totalTime", "duration", "timeLength", "videoLength")
-            .takeIf { it > 0 } ?: 60
-        val ticks = min(options.maxTicksPerTask, max(1, ceil(totalTime / 60.0).toInt()))
-        var last = RunTaskResult(session.platform, task.id, "started")
-        for (i in 1..ticks) {
-            if (shouldCancel()) return last
-            sleepBeforeTick(i, 60)
-            val sessionTime = min(i * 60, totalTime)
+
+        val started = actions.startWelearnProgress(session, task)
+        var sessionTime = jsonDouble(started.task.raw, "sessionTime").toInt().coerceAtLeast(0)
+        var totalTime = jsonDouble(started.task.raw, "totalTime").toInt().coerceAtLeast(0)
+        val progressMeasure = jsonDouble(started.task.raw, "progressMeasure").toInt()
+        val scaled = jsonString(started.task.raw, "scaled")
+        val endTime = welearnTargetSeconds(options.welearnStudyTimeRange)
+        if (totalTime > endTime) {
+            return RunTaskResult(session.platform, task.id, "skipped", "server total_time already exceeds target")
+        }
+
+        var last = RunTaskResult(session.platform, task.id, "started", raw = started.raw)
+        var tick = 0
+        while (!shouldCancel()) {
+            tick += 1
             last = actions.tickWelearnProgress(
                 session,
                 task.id,
-                WelearnTickInput(sessionTime = sessionTime, totalTime = totalTime, finish = false),
+                WelearnTickInput(sessionTime = sessionTime, totalTime = totalTime),
             )
-            onEvent(tickEvent(session.platform, task, i, ticks, percent(i, ticks)))
+            onEvent(tickEvent(session.platform, task, tick, max(1, ((endTime - sessionTime) / 60) + tick), min(100, sessionTime * 100 / max(1, endTime))))
+            if (sessionTime >= endTime) break
+            sessionTime += 60
+            totalTime += 60
+            sleepMillis(60_000L)
         }
-        if (!shouldCancel()) {
-            last = actions.tickWelearnProgress(
-                session,
-                task.id,
-                WelearnTickInput(sessionTime = totalTime, totalTime = totalTime, finish = true),
-            )
-        }
-        return last
+        if (shouldCancel()) return last
+        return actions.tickWelearnProgress(
+            session,
+            task.id,
+            WelearnTickInput(
+                sessionTime = sessionTime,
+                totalTime = totalTime,
+                finish = true,
+                progress = progressMeasure,
+                crate = scaled,
+            ),
+        )
+    }
+
+    private fun welearnTargetSeconds(range: String): Int {
+        if (range.isBlank()) return 1600
+        val parts = range.split("-")
+        require(parts.size == 2) { "welearn studyTime must use min-max minutes" }
+        val minMinutes = parts[0].trim().toIntOrNull()
+            ?: error("welearn studyTime minimum must be an integer")
+        val maxMinutes = parts[1].trim().toIntOrNull()
+            ?: error("welearn studyTime maximum must be an integer")
+        require(minMinutes >= 0 && maxMinutes >= minMinutes) { "welearn studyTime range is invalid" }
+        return Random.nextInt(minMinutes, maxMinutes + 1) * 60
     }
 
     private suspend fun runEnaea(

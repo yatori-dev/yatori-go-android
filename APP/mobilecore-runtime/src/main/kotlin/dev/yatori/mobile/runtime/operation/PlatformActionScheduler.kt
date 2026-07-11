@@ -34,6 +34,7 @@ data class WelearnTickInput(
     val finish: Boolean = false,
     val progress: Int = 100,
     val cstatus: String = "completed",
+    val crate: String = "",
 )
 
 data class CqieTickInput(
@@ -151,7 +152,7 @@ class PlatformActionScheduler(
                 "action" to "finalize",
                 "progress" to input.progress,
                 "cstatus" to input.cstatus,
-            )
+            ) + if (input.crate.isNotBlank()) mapOf("crate" to input.crate) else emptyMap()
         } else {
             mapOf(
                 "action" to "keep",

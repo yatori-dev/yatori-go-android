@@ -778,6 +778,36 @@ class PlatformTaskSchedulerTest {
         assertEquals(100.0, store.loadActionState("xuexitong", "stu", "link1", "xuexitong-hyperlink")!!.progress)
     }
 
+    @Test
+    fun `welearn time mode resumes server baseline and honors configured study range`() = runTest {
+        val session = SessionData("welearn", "stu")
+        val task = TaskItem("p1", type = "video", platform = "welearn", raw = JsonObject().apply {
+            addProperty("cid", "c1")
+            addProperty("uid", "u1")
+            addProperty("classId", "cl1")
+        })
+        gateway.results.add(RunTaskResult("welearn", "p1", "started", raw = JsonObject().apply {
+            addProperty("sessionTime", 120)
+            addProperty("totalTime", 300)
+            addProperty("progressMeasure", 40)
+            addProperty("scaled", "88")
+        }))
+        repeat(19) {
+            gateway.results.add(RunTaskResult("welearn", "p1", "submitted"))
+        }
+        gateway.results.add(RunTaskResult("welearn", "p1", "submitted"))
+
+        taskScheduler.runTask(session, task, PlatformTaskRunOptions(videoModel = 1, welearnStudyTimeRange = "20-20"))
+
+        assertEquals("start", gateway.options.first()["action"])
+        assertEquals(120, gateway.options[1]["sessionTime"])
+        assertEquals(300, gateway.options[1]["totalTime"])
+        assertEquals("finalize", gateway.options.last()["action"])
+        assertEquals(40, gateway.options.last()["progress"])
+        assertEquals("88", gateway.options.last()["crate"])
+        assertEquals(18, gateway.sleeps.size)
+    }
+
     private class FakeGateway : CoreGateway {
         val results = ArrayDeque<RunTaskResult>()
         val options = mutableListOf<Map<String, Any>>()

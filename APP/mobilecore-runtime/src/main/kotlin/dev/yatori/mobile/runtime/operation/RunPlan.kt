@@ -80,6 +80,8 @@ data class RunPlan(
     val yinghuaVideoModel: Int = 1,
     /** 1 = time-accumulation SCORM loop, 2 = one-shot complete (WeLearnCompletePointAction). */
     val welearnVideoModel: Int = 1,
+    /** Per-point target minutes in Console-compatible min-max form; blank uses Console default 1600 seconds. */
+    val welearnStudyTimeRange: String = "",
     /** 1 = 3 s position-window loop, 2 = 秒刷 one-shot submit. Mirrors cqie CoursesCustom.videoModel. */
     val cqieVideoModel: Int = 1,
     /** Task ids already submitted, so a resumed plan does not redo them. */

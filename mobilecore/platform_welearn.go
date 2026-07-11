@@ -91,6 +91,35 @@ func welearnRet(raw string) (int, bool) {
 	return int(*r.Ret), true
 }
 
+func welearnScormBaseline(raw string) (map[string]interface{}, error) {
+	var response struct {
+		Comment string `json:"comment"`
+	}
+	if err := json.Unmarshal([]byte(raw), &response); err != nil || response.Comment == "" {
+		return nil, fmt.Errorf("welearn: invalid study baseline")
+	}
+	var comment struct {
+		CMI struct {
+			SessionTime     float64 `json:"session_time"`
+			TotalTime       float64 `json:"total_time"`
+			ProgressMeasure string  `json:"progress_measure"`
+			Score           struct {
+				Scaled string `json:"scaled"`
+			} `json:"score"`
+		} `json:"cmi"`
+	}
+	if err := json.Unmarshal([]byte(response.Comment), &comment); err != nil {
+		return nil, fmt.Errorf("welearn: invalid study baseline: %w", err)
+	}
+	progress, _ := strconv.Atoi(comment.CMI.ProgressMeasure)
+	return map[string]interface{}{
+		"sessionTime":     int(comment.CMI.SessionTime),
+		"totalTime":       int(comment.CMI.TotalTime),
+		"progressMeasure": progress,
+		"scaled":          comment.CMI.Score.Scaled,
+	}, nil
+}
+
 // numToStr robustly converts an int/float/string raw value to a string.
 func numToStr(v interface{}) string {
 	switch t := v.(type) {
@@ -228,6 +257,7 @@ func getTasksWelearn(sess SessionData, input CourseInput) (TaskListResult, error
 				"pointId":    p.Id,
 				"crate":      p.Crate,
 				"isComplete": p.IsComplete,
+				"isVisible":  p.IsVisible,
 				"unitIdx":    unitIdx,
 				"learnCount": p.LearnCount,
 				"location":   p.Location,
@@ -275,7 +305,10 @@ func runTaskWelearn(sess SessionData, input TaskInput) (RunTaskResult, error) {
 	if classId == "" {
 		return RunTaskResult{}, fmt.Errorf("welearn: taskJSON.raw.classId is required")
 	}
-	crate := strOf(input.Raw["crate"])
+	crate := strOf(input.Options["crate"])
+	if crate == "" {
+		crate = strOf(input.Raw["crate"])
+	}
 	if crate == "" {
 		crate = "100"
 	}
@@ -297,10 +330,31 @@ func runTaskWelearn(sess SessionData, input TaskInput) (RunTaskResult, error) {
 
 	switch action {
 	case "start":
+		submitRaw, err := welearnSubmitStudyTimeProvider(cache, uid, cid, classId, scoId)
+		if err != nil {
+			return RunTaskResult{}, fmt.Errorf("welearn: read study baseline failed: %w", err)
+		}
+		ret, ok := welearnRet(submitRaw)
+		if !ok {
+			return RunTaskResult{}, fmt.Errorf("welearn: read study baseline failed")
+		}
 		if _, err := welearnStartStudyProvider(cache, cid, scoId, uid, crate, classId, false); err != nil {
 			return RunTaskResult{}, fmt.Errorf("welearn: start study failed: %w", err)
 		}
-		return RunTaskResult{Platform: "welearn", TaskID: scoId, Status: "started", Message: "action=start"}, nil
+		if ret == -1 {
+			submitRaw, err = welearnSubmitStudyTimeProvider(cache, uid, cid, classId, scoId)
+			if err != nil {
+				return RunTaskResult{}, fmt.Errorf("welearn: read study baseline failed: %w", err)
+			}
+			if retryRet, retryOK := welearnRet(submitRaw); !retryOK || retryRet != 0 {
+				return RunTaskResult{}, fmt.Errorf("welearn: read study baseline failed")
+			}
+		}
+		baseline, err := welearnScormBaseline(submitRaw)
+		if err != nil {
+			return RunTaskResult{}, err
+		}
+		return RunTaskResult{Platform: "welearn", TaskID: scoId, Status: "started", Message: "action=start", Raw: baseline}, nil
 	case "keep", "continue":
 		sessionTime := optInt(input.Options["sessionTime"], 60)
 		totalTime := optInt(input.Options["totalTime"], sessionTime)

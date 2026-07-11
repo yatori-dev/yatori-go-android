@@ -81,6 +81,7 @@ class CourseSyncWorker(
             enaeaVideoModel = enaeaVideoModelFromSavedConfig(container, platform, account),
             yinghuaVideoModel = yinghuaVideoModelFromSavedConfig(container, platform, account),
             welearnVideoModel = welearnVideoModelFromSavedConfig(container, platform, account),
+            welearnStudyTimeRange = welearnStudyTimeFromSavedConfig(container, platform, account),
             cqieVideoModel = cqieVideoModelFromSavedConfig(container, platform, account),
             completedTaskIds = completed,
         )
@@ -411,7 +412,19 @@ internal fun welearnVideoModelFromSavedConfig(container: AppContainer, platform:
         it.str("account").equals(account, ignoreCase = false) &&
             it.str("accountType").equals(platform, ignoreCase = true)
     } ?: return 1
-    return user.obj("coursesCustom").int("videoModel", 1).takeIf { it in 1..2 } ?: 1
+    return welearnVideoModelFromCoursesCustom(user.obj("coursesCustom"))
+}
+
+internal fun welearnVideoModelFromCoursesCustom(cc: JsonObject): Int =
+    cc.int("videoModel", 1).takeIf { it in 0..2 } ?: 1
+
+internal fun welearnStudyTimeFromSavedConfig(container: AppContainer, platform: String, account: String): String {
+    if (platform != "welearn") return ""
+    val user = container.repository.loadSavedConfig()?.users?.firstOrNull {
+        it.str("account").equals(account, ignoreCase = false) &&
+            it.str("accountType").equals(platform, ignoreCase = true)
+    } ?: return ""
+    return user.obj("coursesCustom").str("studyTime").trim()
 }
 
 internal fun cqieVideoModelFromSavedConfig(container: AppContainer, platform: String, account: String): Int {
