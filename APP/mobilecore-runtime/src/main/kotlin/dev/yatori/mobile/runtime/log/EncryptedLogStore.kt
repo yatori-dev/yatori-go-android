@@ -192,6 +192,17 @@ class EncryptedLogStore(
         seeded = true
     }
 
+    /** Clears every current and historical session file. Returns the number deleted. */
+    @Synchronized
+    fun clearHistory(): Int {
+        val files = dir.listFiles { f -> f.name.endsWith(EXT) }.orEmpty()
+        val deleted = files.count { it.delete() }
+        liveState.value = emptyList()
+        diskFrameCount = 0
+        seeded = true
+        return deleted
+    }
+
     fun deleteHistory(name: String): Boolean {
         val f = File(dir, name)
         return f.parentFile == dir && f.delete()

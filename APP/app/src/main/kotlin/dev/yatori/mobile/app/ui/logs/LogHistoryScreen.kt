@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.runtime.Composable
@@ -29,6 +30,7 @@ import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.MobileConfig
 import dev.yatori.mobile.api.dto.localFullTime
 import dev.yatori.mobile.app.di.AppContainer
+import dev.yatori.mobile.app.ui.common.ConfirmDialog
 import dev.yatori.mobile.app.ui.common.EmptyState
 import dev.yatori.mobile.app.ui.common.SecondaryScaffold
 import dev.yatori.mobile.app.ui.common.TopBarAction
@@ -53,11 +55,51 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 fun LogHistoryScreen(container: AppContainer, nav: Navigator) {
     val store = container.logStore
-    val history = remember { runCatching { store.listHistory() }.getOrDefault(emptyList()) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var history by remember { mutableStateOf(runCatching { store.listHistory() }.getOrDefault(emptyList())) }
+    var showClearConfirm by remember { mutableStateOf(false) }
 
-    SecondaryScaffold(title = "历史日志", nav = nav) { innerPadding ->
+    SecondaryScaffold(
+        title = "历史日志",
+        nav = nav,
+        actions = {
+            TopBarAction(Icons.Rounded.DeleteSweep, "清除历史日志", onClick = {
+                if (history.isEmpty()) {
+                    Toast.makeText(context, "暂无历史日志", Toast.LENGTH_SHORT).show()
+                } else {
+                    showClearConfirm = true
+                }
+            })
+        },
+    ) { innerPadding ->
         HistoryList(history, innerPadding, onOpen = { nav.push(Route.LogHistoryDetail(it.name)) })
     }
+
+    ConfirmDialog(
+        show = showClearConfirm,
+        title = "清除历史日志？",
+        message = "将删除所有历史日志，此操作无法撤销。",
+        confirmLabel = "清除",
+        onConfirm = {
+            showClearConfirm = false
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val deleted = store.clearHistory()
+                        deleted to store.listHistory()
+                    }
+                }.onSuccess { (deleted, remaining) ->
+                    history = remaining
+                    val message = if (remaining.isEmpty()) "已清除 $deleted 个历史日志" else "已清除 $deleted 个，${remaining.size} 个删除失败"
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                }.onFailure { error ->
+                    Toast.makeText(context, "清除失败：${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        },
+        onDismiss = { showClearConfirm = false },
+    )
 }
 
 @Composable

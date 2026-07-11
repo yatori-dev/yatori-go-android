@@ -157,4 +157,17 @@ class EncryptedLogStoreTest {
         // The live buffer matches the on-disk compacted window exactly.
         assertEquals(read.map { it.id }, s.live.value.map { it.id })
     }
+
+    @Test
+    fun `clearHistory deletes every session file and resets live logs`() {
+        store(1_000L).appendEntries(listOf(entry(1)))
+        val current = store(2_000L)
+        current.appendEntries(listOf(entry(2)))
+
+        val deleted = current.clearHistory()
+
+        assertEquals(2, deleted)
+        assertTrue(current.listHistory().isEmpty())
+        assertTrue(current.live.value.isEmpty())
+    }
 }
