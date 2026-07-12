@@ -32,6 +32,7 @@ interface CoreGateway {
     suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any> = emptyMap()): RunTaskResult
 
     // logs
+    fun setLogNotifier(onLogsAvailable: (() -> Unit)?) {}
     suspend fun getLogs(cursor: String = ""): LogResult
     suspend fun clearLogs()
     suspend fun setLogLevel(level: String)

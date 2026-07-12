@@ -11,12 +11,13 @@ const maxLogEntries = 1000
 
 // LogEntry is one log record returned to Android.
 type LogEntry struct {
-	ID       uint64 `json:"id"`
-	Time     string `json:"time"`
-	Level    string `json:"level"`
-	Source   string `json:"source"`
-	Platform string `json:"platform,omitempty"`
-	Message  string `json:"message"`
+	ID              uint64 `json:"id"`
+	Time            string `json:"time"`
+	TimestampMicros int64  `json:"timestampMicros"`
+	Level           string `json:"level"`
+	Source          string `json:"source"`
+	Platform        string `json:"platform,omitempty"`
+	Message         string `json:"message"`
 }
 
 const (
@@ -26,33 +27,66 @@ const (
 	lvlError = 3
 )
 
+// LogNotifier is implemented by the mobile host. Notifications are edge-triggered: one signal is
+// sent when new logs become available, then re-armed by GetLogs.
+type LogNotifier interface {
+	OnLogsAvailable()
+}
+
 type logBuffer struct {
-	mu      sync.Mutex
-	entries []LogEntry
-	nextID  uint64
-	level   int
+	mu            sync.Mutex
+	entries       []LogEntry
+	nextID        uint64
+	level         int
+	notifier      LogNotifier
+	notifyPending bool
 }
 
 var logBuf = logBuffer{level: lvlInfo}
 
 func appendLog(levelInt int, levelStr, platform, msg string) {
 	logBuf.mu.Lock()
-	defer logBuf.mu.Unlock()
 	if levelInt < logBuf.level {
+		logBuf.mu.Unlock()
 		return
 	}
 	logBuf.nextID++
+	now := time.Now()
 	e := LogEntry{
-		ID:       logBuf.nextID,
-		Time:     time.Now().Format(time.RFC3339),
-		Level:    levelStr,
-		Source:   "mobilecore",
-		Platform: platform,
-		Message:  msg,
+		ID:              logBuf.nextID,
+		Time:            now.Format(time.RFC3339Nano),
+		TimestampMicros: now.UnixMicro(),
+		Level:           levelStr,
+		Source:          "mobilecore",
+		Platform:        platform,
+		Message:         msg,
 	}
 	logBuf.entries = append(logBuf.entries, e)
 	if len(logBuf.entries) > maxLogEntries {
 		logBuf.entries = logBuf.entries[len(logBuf.entries)-maxLogEntries:]
+	}
+	var notify LogNotifier
+	if logBuf.notifier != nil && !logBuf.notifyPending {
+		logBuf.notifyPending = true
+		notify = logBuf.notifier
+	}
+	logBuf.mu.Unlock()
+	if notify != nil {
+		notify.OnLogsAvailable()
+	}
+}
+
+// SetLogNotifier registers the mobile host callback. Passing nil unregisters it.
+func SetLogNotifier(notifier LogNotifier) {
+	logBuf.mu.Lock()
+	logBuf.notifier = notifier
+	shouldNotify := notifier != nil && len(logBuf.entries) > 0 && !logBuf.notifyPending
+	if shouldNotify {
+		logBuf.notifyPending = true
+	}
+	logBuf.mu.Unlock()
+	if shouldNotify {
+		notifier.OnLogsAvailable()
 	}
 }
 
@@ -91,6 +125,7 @@ func GetLogs(cursor string) (result string) {
 		// truncated when caller asked for entries after fromID but some were already evicted
 		truncated = fromID > 0 && fromID < oldestID-1
 	}
+	logBuf.notifyPending = false
 	logBuf.mu.Unlock()
 	if len(filtered) > 0 {
 		nextCursor = filtered[len(filtered)-1].ID
@@ -109,6 +144,7 @@ func ClearLogs() (result string) {
 	defer panicGuard(&result)
 	logBuf.mu.Lock()
 	logBuf.entries = logBuf.entries[:0]
+	logBuf.notifyPending = false
 	logBuf.mu.Unlock()
 	return okResp(nil)
 }

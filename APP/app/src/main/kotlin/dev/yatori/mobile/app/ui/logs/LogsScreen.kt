@@ -20,10 +20,8 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,10 +46,13 @@ import dev.yatori.mobile.app.ui.common.rememberBarBackdrop
 import dev.yatori.mobile.app.ui.common.topBarBlur
 import dev.yatori.mobile.app.ui.nav.Navigator
 import dev.yatori.mobile.app.ui.nav.Route
+import dev.yatori.mobile.app.ui.theme.LogScrollMode
 import dev.yatori.mobile.api.dto.LogEntry
 import dev.yatori.mobile.api.dto.localFullTime
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Text
@@ -59,6 +60,8 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+
+private const val LOG_TRANSITION_GATE_MS = 300L
 
 /**
  * Logs tab (HyperCeiler interaction): large title + export/share-zip/more actions; an always-on
@@ -72,16 +75,27 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior()
 
-    val live by container.liveLogs.collectAsState()
-    // Newest-first for display; the live buffer is already bounded to LIVE_CAP.
-    val all = remember(live) { live.asReversed().distinctBy { it.id } }
+    var all by remember { mutableStateOf(container.liveLogs.value) }
+    var collectLive by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var levelFilter by remember { mutableStateOf<String?>(null) } // null = all
+    var scrollMode by remember { mutableStateOf(container.themePrefs.loadLogScrollMode()) }
     var detail by remember { mutableStateOf<LogEntry?>(null) }
     var showClear by remember { mutableStateOf(false) }
     var pendingExport by remember { mutableStateOf<java.io.File?>(null) }
-    val sessions = remember(all) { repo.listSessions() }
-    val savedConfig = remember(all) { repo.loadSavedConfig() }
+    var sessions by remember {
+        mutableStateOf(emptyList<dev.yatori.mobile.runtime.StoredSession>())
+    }
+    var savedConfig by remember {
+        mutableStateOf<dev.yatori.mobile.api.dto.MobileConfig?>(null)
+    }
+
+    // Do not subscribe while hidden or during the tab animation. The pipeline continues to drain,
+    // sort and persist in the background; after the transition this receives one latest snapshot.
+    if (collectLive) {
+        val latest by container.liveLogs.collectAsState()
+        LaunchedEffect(latest) { all = latest }
+    }
 
     val saveLogLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument(LOG_EXPORT_MIME_TYPE),
@@ -102,24 +116,23 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     }
 
     val listState = rememberLazyListState()
-    // True when the user is at (or very near) the top — used to decide auto-scroll on refresh.
-    val isAtTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 80 } }
 
-    // The centralized poller (AppContainer) drains the Go-core buffer; here we only raise the
-    // poll cadence while this tab is visible and observe the pushed [liveLogs] — no per-tick
-    // full-file decrypt.
-    DisposableEffect(isActive) {
-        if (isActive) container.retainLogView()
-        onDispose { if (isActive) container.releaseLogView() }
-    }
-    // Auto-scroll to newest: on first activation, and thereafter only when the user is at top.
     LaunchedEffect(isActive) {
+        collectLive = false
         if (!isActive) return@LaunchedEffect
-        delay(300) // let the tab-switch animation settle before snapping
-        if (all.isNotEmpty()) listState.scrollToItem(0)
+        delay(LOG_TRANSITION_GATE_MS)
+        val metadata = withContext(Dispatchers.IO) {
+            repo.listSessions() to repo.loadSavedConfig()
+        }
+        sessions = metadata.first
+        savedConfig = metadata.second
+        all = container.liveLogs.value
+        collectLive = true
     }
-    LaunchedEffect(all.firstOrNull()?.id) {
-        if (isActive && isAtTop && all.isNotEmpty()) listState.scrollToItem(0)
+    LaunchedEffect(all, collectLive, scrollMode) {
+        if (isActive && collectLive && scrollMode == LogScrollMode.REALTIME && all.isNotEmpty()) {
+            listState.scrollToItem(0)
+        }
     }
 
     // Recompute only when the underlying data or filter criteria change.
@@ -174,6 +187,26 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
                                         "仅 WARN" to { levelFilter = "warn" },
                                         "仅 ERROR" to { levelFilter = "error" },
                                     ),
+                                    selectedIndex = when (levelFilter) {
+                                        null -> 0
+                                        "info" -> 1
+                                        "warn" -> 2
+                                        else -> 3
+                                    },
+                                ),
+                                MenuEntry.Submenu(
+                                    "日志滚动",
+                                    listOf(
+                                        "实时滚动" to {
+                                            scrollMode = LogScrollMode.REALTIME
+                                            container.themePrefs.saveLogScrollMode(scrollMode)
+                                        },
+                                        "不滚动" to {
+                                            scrollMode = LogScrollMode.NONE
+                                            container.themePrefs.saveLogScrollMode(scrollMode)
+                                        },
+                                    ),
+                                    selectedIndex = if (scrollMode == LogScrollMode.REALTIME) 0 else 1,
                                 ),
                             ),
                         )
@@ -217,13 +250,12 @@ fun LogsScreen(container: AppContainer, nav: Navigator, bottomPadding: Dp, isAct
     ConfirmDialog(
         show = showClear,
         title = "清空日志",
-        message = "确定清空当前会话日志并重置游标？",
+        message = "确定清空当前会话日志？",
         confirmLabel = "清空",
         onConfirm = {
             scope.launch {
-                runCatching { repo.clearLogs() }
-                container.logStore.clearCurrentSession()
-                // clearCurrentSession empties the live buffer → `all` recomposes to empty.
+                runCatching { container.logPipeline.clear() }
+                    .onFailure { Toast.makeText(context, "清空失败：${it.message}", Toast.LENGTH_LONG).show() }
             }
             showClear = false
         },

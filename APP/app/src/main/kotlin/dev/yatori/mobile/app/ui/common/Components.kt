@@ -197,7 +197,11 @@ fun OverflowMenu(
 sealed interface MenuEntry {
     val label: String
     data class Action(override val label: String, val onClick: () -> Unit) : MenuEntry
-    data class Submenu(override val label: String, val items: List<Pair<String, () -> Unit>>) : MenuEntry
+    data class Submenu(
+        override val label: String,
+        val items: List<Pair<String, () -> Unit>>,
+        val selectedIndex: Int? = null,
+    ) : MenuEntry
 }
 
 /**
@@ -260,7 +264,7 @@ fun NestedOverflowMenu(
                 DropdownImpl(
                     text = label,
                     optionSize = items.size,
-                    isSelected = false,
+                    isSelected = sub?.selectedIndex == index,
                     index = index,
                     onSelectedIndexChange = { dismiss?.invoke(); action() },
                 )

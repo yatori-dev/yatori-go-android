@@ -252,18 +252,17 @@ internal suspend fun autoReloginWithOcr(
 }
 
 private fun appendRunEvent(container: AppContainer, event: SyncEvent) {
-    val id = -System.nanoTime()
-    container.logStore.appendEntries(
-        listOf(
-            LogEntry(
-                id = id,
-                time = Instant.now().toString(),
-                level = event.level,
-                source = "android-runtime",
-                platform = event.platform,
-                message = event.message,
-                account = event.account,
-            ),
+    val now = Instant.now()
+    container.logPipeline.submitAndroid(
+        LogEntry(
+            id = -System.nanoTime(),
+            time = now.toString(),
+            timestampMicros = now.epochSecond * 1_000_000L + now.nano / 1_000,
+            level = event.level,
+            source = "android-runtime",
+            platform = event.platform,
+            message = event.message,
+            account = event.account,
         ),
     )
 }

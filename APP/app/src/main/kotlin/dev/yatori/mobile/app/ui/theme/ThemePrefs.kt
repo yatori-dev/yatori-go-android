@@ -11,6 +11,12 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 /** Page-transition style. SLIDE = coordinated horizontal scroll; FADE = crossfade. */
 enum class PageAnim { SLIDE, FADE }
 
+/** New-log scrolling behavior on the logs screen. */
+enum class LogScrollMode { REALTIME, NONE }
+
+internal fun parseLogScrollMode(raw: String?): LogScrollMode =
+    runCatching { raw?.let(LogScrollMode::valueOf) }.getOrNull() ?: LogScrollMode.REALTIME
+
 /**
  * Predefined accent (key/seed) colors offered in the 强调色 picker, as ARGB ints. `0` means
  * "no custom accent" (default scheme / wallpaper Monet). Mirrors KernelSU's `keyColorOptions`.
@@ -109,6 +115,13 @@ class ThemePrefs(context: Context) {
             .apply()
     }
 
+    fun loadLogScrollMode(): LogScrollMode =
+        parseLogScrollMode(prefs.getString(KEY_LOG_SCROLL_MODE, null))
+
+    fun saveLogScrollMode(mode: LogScrollMode) {
+        prefs.edit().putString(KEY_LOG_SCROLL_MODE, mode.name).apply()
+    }
+
     private companion object {
         const val KEY_MODE = "mode"
         const val KEY_MONET = "monet"
@@ -122,5 +135,6 @@ class ThemePrefs(context: Context) {
         const val KEY_PAGE_ANIM = "page_anim"
         const val KEY_TAB_ANIM = "tab_anim"
         const val KEY_SCALE = "ui_scale"
+        const val KEY_LOG_SCROLL_MODE = "log_scroll_mode"
     }
 }

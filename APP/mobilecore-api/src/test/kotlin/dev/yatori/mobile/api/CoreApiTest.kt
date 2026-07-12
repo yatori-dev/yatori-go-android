@@ -142,6 +142,22 @@ class DtoTest {
         assertEquals("mobilecore", e.source)
         assertEquals("yinghua", e.platform)
         assertEquals("StartLogin started", e.message)
+        assertNull(e.timestampMicros)
+    }
+
+    @Test fun `LogEntry event time prefers numeric micros and falls back to RFC3339`() {
+        val numeric = LogEntry(
+            id = 1,
+            time = "2026-06-23T06:00:00Z",
+            level = "info",
+            source = "mobilecore",
+            message = "numeric",
+            timestampMicros = 123L,
+        )
+        val legacy = numeric.copy(timestampMicros = null)
+
+        assertEquals(123L, numeric.eventTimeMicros())
+        assertNotNull(legacy.eventTimeMicros())
     }
 
     @Test fun `LogEntry local time converts UTC timestamp to requested zone`() {

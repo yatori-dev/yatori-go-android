@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func resetLogs() {
@@ -11,6 +12,8 @@ func resetLogs() {
 	logBuf.entries = logBuf.entries[:0]
 	logBuf.nextID = 0
 	logBuf.level = lvlInfo
+	logBuf.notifier = nil
+	logBuf.notifyPending = false
 	logBuf.mu.Unlock()
 }
 
@@ -64,6 +67,73 @@ func TestGetLogsAfterWrite(t *testing.T) {
 	}
 	if logs[0].Platform != "testplatform" {
 		t.Fatalf("unexpected platform: %q", logs[0].Platform)
+	}
+}
+
+func TestLogEntryHasHighPrecisionTimestamp(t *testing.T) {
+	resetLogs()
+	logInfo("testplatform", "high precision")
+	_, logs := parseGetLogsData(t, GetLogs("0"))
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(logs))
+	}
+	if logs[0].TimestampMicros <= 0 {
+		t.Fatalf("timestampMicros=%d, want positive", logs[0].TimestampMicros)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, logs[0].Time)
+	if err != nil {
+		t.Fatalf("time=%q is not RFC3339Nano: %v", logs[0].Time, err)
+	}
+	if parsed.UnixMicro() != logs[0].TimestampMicros {
+		t.Fatalf("time micros=%d, timestampMicros=%d", parsed.UnixMicro(), logs[0].TimestampMicros)
+	}
+}
+
+type testLogNotifier struct {
+	count    int
+	onNotify func()
+}
+
+func (n *testLogNotifier) OnLogsAvailable() {
+	n.count++
+	if n.onNotify != nil {
+		n.onNotify()
+	}
+}
+
+func TestLogNotifierCoalescesUntilDrain(t *testing.T) {
+	resetLogs()
+	notifier := &testLogNotifier{}
+	SetLogNotifier(notifier)
+	defer SetLogNotifier(nil)
+
+	logInfo("", "one")
+	logInfo("", "two")
+	if notifier.count != 1 {
+		t.Fatalf("notifications=%d, want 1 before drain", notifier.count)
+	}
+	GetLogs("0")
+	logInfo("", "three")
+	if notifier.count != 2 {
+		t.Fatalf("notifications=%d, want 2 after drain", notifier.count)
+	}
+}
+
+func TestLogNotifierRunsOutsideBufferLock(t *testing.T) {
+	resetLogs()
+	notifier := &testLogNotifier{onNotify: func() { GetLogs("0") }}
+	SetLogNotifier(notifier)
+	defer SetLogNotifier(nil)
+
+	done := make(chan struct{})
+	go func() {
+		logInfo("", "no deadlock")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("notifier callback deadlocked on log buffer")
 	}
 }
 

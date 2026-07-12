@@ -47,6 +47,19 @@ class EncryptedLogStoreTest {
     }
 
     @Test
+    fun `current live and persisted reads are chronologically ordered across append batches`() {
+        val s = store(1_000L)
+        val lateAndroid = entry(10, msg = "android-12").copy(timestampMicros = 12_000_000L)
+        val earlierCore = entry(11, msg = "core-10").copy(timestampMicros = 10_000_000L)
+
+        s.appendEntries(listOf(lateAndroid))
+        s.appendEntries(listOf(earlierCore))
+
+        assertEquals(listOf("core-10", "android-12"), s.live.value.map { it.message })
+        assertEquals(listOf("core-10", "android-12"), s.readCurrentSession().map { it.message })
+    }
+
+    @Test
     fun `empty session creates no file`() {
         store(1_000L).appendEntries(emptyList())
         assertEquals(0, dir.listFiles { f -> f.name.endsWith(EncryptedLogStore.EXT) }?.size ?: 0)

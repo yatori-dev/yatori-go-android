@@ -8,6 +8,7 @@ import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
 import dev.yatori.mobile.api.dto.*
 import dev.yatori.mobile.api.internal.EnvelopeParser
+import dev.yatori.mobile.mobilecore.LogNotifier
 import dev.yatori.mobile.mobilecore.Mobilecore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withContext
 class YatoriMobileCore {
 
     private val gson: Gson = GsonBuilder().serializeNulls().create()
+    @Volatile private var logNotifier: LogNotifier? = null
 
     suspend fun init(baseDir: String): InitResult = io {
         EnvelopeParser.parse(Mobilecore.init(baseDir)) {
@@ -116,6 +118,17 @@ class YatoriMobileCore {
         EnvelopeParser.parse(Mobilecore.runTask(gson.toJson(session), taskJson)) {
             gson.fromJson(it.toString(), RunTaskResult::class.java)
         }
+    }
+
+    @Synchronized
+    fun setLogNotifier(onLogsAvailable: (() -> Unit)?) {
+        val bridge = onLogsAvailable?.let { callback ->
+            object : LogNotifier {
+                override fun onLogsAvailable() = callback()
+            }
+        }
+        logNotifier = bridge
+        Mobilecore.setLogNotifier(bridge)
     }
 
     suspend fun getLogs(cursor: String = ""): LogResult = io {

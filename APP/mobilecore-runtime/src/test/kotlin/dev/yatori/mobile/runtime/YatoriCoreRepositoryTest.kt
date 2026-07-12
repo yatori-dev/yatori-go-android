@@ -121,10 +121,10 @@ class YatoriCoreRepositoryTest {
     }
 
     @Test
-    fun `pollLogs uses stored cursor and saves nextCursor`() = runTest {
+    fun `drainLogs uses stored cursor and saves nextCursor`() = runTest {
         store.saveLogCursor("old-cursor")
         gateway.logsResult = LogResult("new-cursor", "old-cursor", false, emptyList())
-        repo.pollLogs()
+        repo.drainLogs()
         assertEquals("new-cursor", store.loadLogCursor())
         assertEquals("old-cursor", gateway.lastCursorUsed)
     }

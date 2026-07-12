@@ -141,14 +141,13 @@ class YatoriCoreRepository(
 
     // ── logs ──────────────────────────────────────────────────────────────────
 
-    /**
-     * Reads cursor from store, polls gateway, writes the returned Go-core logs into the
-     * current encrypted log session (unchanged, unmerged), then saves nextCursor.
-     */
-    suspend fun pollLogs(): LogResult {
+    /** Registers the edge-triggered Go-core log availability callback. */
+    fun setLogNotifier(onLogsAvailable: (() -> Unit)?) = gateway.setLogNotifier(onLogsAvailable)
+
+    /** Reads and advances the Go cursor without writing; the unified pipeline owns persistence. */
+    suspend fun drainLogs(): LogResult {
         val cursor = store.loadLogCursor()
         val result = gateway.getLogs(cursor)
-        if (result.logs.isNotEmpty()) logStore?.appendEntries(result.logs)
         store.saveLogCursor(result.nextCursor)
         return result
     }

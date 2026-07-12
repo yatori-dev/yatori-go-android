@@ -31,7 +31,6 @@ import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -64,6 +63,7 @@ import dev.yatori.mobile.app.ui.theme.isInDarkTheme
 import dev.yatori.mobile.app.ui.theme.LocalThemeState
 import dev.yatori.mobile.api.dto.HealthInfo
 import dev.yatori.mobile.runtime.operation.OperationStatus
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -97,9 +97,21 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
     var core by remember { mutableStateOf<CoreUiState>(CoreUiState.Loading) }
     var accountCount by remember { mutableStateOf(0) }
     var courseCount by remember { mutableStateOf(0) }
-    val liveLogs by container.liveLogs.collectAsState()
-    // Newest-first, last 5 — pushed from the centralized poller, no disk decrypt here.
-    val recent = remember(liveLogs) { liveLogs.takeLast(5).reversed() }
+    var liveLogs by remember { mutableStateOf(container.liveLogs.value) }
+    var collectLogs by remember { mutableStateOf(false) }
+    LaunchedEffect(isActive) {
+        collectLogs = false
+        if (!isActive) return@LaunchedEffect
+        delay(300L)
+        liveLogs = container.liveLogs.value
+        collectLogs = true
+    }
+    if (collectLogs) {
+        val latest by container.liveLogs.collectAsState()
+        LaunchedEffect(latest) { liveLogs = latest }
+    }
+    // Already newest-first; no UI-thread sorting or disk decrypt here.
+    val recent = remember(liveLogs) { liveLogs.take(5) }
     val operations by container.operationController.operations.collectAsState()
     val questionHistory by container.operationController.questionHistory.collectAsState()
     val pendingTaskChallenges by container.pendingTaskChallengesFlow.collectAsState()
@@ -134,13 +146,6 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
     }
 
     LaunchedEffect(Unit) { refresh(showToast = false) }
-
-    // Raise the log-poll cadence while Home is the visible tab; the centralized poller in
-    // AppContainer does the actual draining and pushes updates via [liveLogs].
-    DisposableEffect(isActive) {
-        if (isActive) container.retainLogView()
-        onDispose { if (isActive) container.releaseLogView() }
-    }
 
     val barBackdrop = rememberBarBackdrop()
     val barTint = MiuixTheme.colorScheme.surface.copy(alpha = 0.7f)
@@ -191,7 +196,7 @@ fun HomeScreen(container: AppContainer, nav: Navigator, bottomPadding: androidx.
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "当前运行",
+                        "运行状态",
                         color = MiuixTheme.colorScheme.onBackgroundVariant,
                         style = MiuixTheme.textStyles.subtitle,
                     )

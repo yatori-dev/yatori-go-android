@@ -16,6 +16,7 @@ import dev.yatori.mobile.api.dto.InitResult
 import dev.yatori.mobile.runtime.internal.EncryptedFileIo
 import dev.yatori.mobile.runtime.log.EncryptedLogStore
 import dev.yatori.mobile.runtime.log.KeystoreLogCrypto
+import dev.yatori.mobile.runtime.log.UnifiedLogPipeline
 import dev.yatori.mobile.runtime.operation.AnswerEditRequest
 import dev.yatori.mobile.runtime.operation.AnswerEditResolver
 import dev.yatori.mobile.runtime.operation.AnswerMode
@@ -38,10 +39,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -65,6 +67,10 @@ class AppContainer private constructor(context: Context) {
 
     val operationController: OperationController = OperationController()
 
+    /** Process-lifetime scopes; AppContainer is the application singleton. */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val logScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val store: MobilecoreStore = MobilecoreStore(appContext.filesDir, EncryptedFileIo(appContext))
     private val fontAssetLoader: XuexitongFontAssetLoader = XuexitongFontAssetLoader(appContext.assets)
     @Volatile private var fontAssetResult: XuexitongFontAssetResult? = null
@@ -86,38 +92,26 @@ class AppContainer private constructor(context: Context) {
     val platformTaskScheduler: PlatformTaskScheduler = PlatformTaskScheduler(platformActionScheduler)
 
     // ── centralized log pipeline ─────────────────────────────────────────────────
-    //
-    // ONE process-wide coroutine drains the Go-core log ring into the encrypted store; each
-    // append pushes into the store's bounded in-memory buffer ([EncryptedLogStore.live]).
-    // Screens observe [liveLogs] instead of decrypting the whole session file on a timer — that
-    // per-poll full-file decrypt was what made the app progressively laggier the longer a task
-    // ran. The poll cadence is fast while a screen is actively viewing logs (viewer ref-count
-    // > 0) and slow otherwise, but it never stops, so logs are still drained during background
-    // runs and nothing is lost from the bounded Go ring.
+    // Go only signals availability; all draining, ordering, encryption and live publication run
+    // on the dedicated IO scope in short micro-batches.
 
-    /** Process-lifetime scope; never cancelled (AppContainer is a singleton). */
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val logPipeline: UnifiedLogPipeline = UnifiedLogPipeline(
+        scope = logScope,
+        store = logStore,
+        fetchCoreLogs = { repository.drainLogs() },
+        clearCoreLogs = { repository.clearLogs() },
+    )
 
-    /** Bounded (≤ LIVE_CAP), newest-last current-session logs, pushed on every append. */
+    /** Bounded (≤ LIVE_CAP), newest-first display snapshot prepared off the main thread. */
     val liveLogs: StateFlow<List<LogEntry>> = logStore.live
-
-    private val logViewers = MutableStateFlow(0)
-
-    /** A log-displaying screen calls this while visible to raise the poll cadence. */
-    fun retainLogView() { logViewers.update { it + 1 } }
-
-    /** Balances a prior [retainLogView]; floors at 0. */
-    fun releaseLogView() { logViewers.update { (it - 1).coerceAtLeast(0) } }
+        .map { it.asReversed() }
+        .stateIn(logScope, SharingStarted.Eagerly, emptyList())
 
     init {
-        // Trim old session files once per process, then drain the Go-core log buffer forever.
-        appScope.launch {
-            runCatching { logStore.enforceRetention() }
-            while (true) {
-                runCatching { repository.pollLogs() }
-                delay(if (logViewers.value > 0) ACTIVE_LOG_POLL_MS else IDLE_LOG_POLL_MS)
-            }
-        }
+        logScope.launch { runCatching { logStore.enforceRetention() } }
+        repository.setLogNotifier(logPipeline::notifyCoreLogsAvailable)
+        // Drain logs that may have been produced before notifier registration.
+        logPipeline.notifyCoreLogsAvailable()
     }
 
     private val answerProviderFactory by lazy {
@@ -463,12 +457,6 @@ class AppContainer private constructor(context: Context) {
     }
 
     companion object {
-        /** Log-drain cadence while a screen is actively viewing logs. */
-        private const val ACTIVE_LOG_POLL_MS = 3_000L
-
-        /** Log-drain cadence when no screen is viewing (still drains background runs). */
-        private const val IDLE_LOG_POLL_MS = 15_000L
-
         @Volatile private var instance: AppContainer? = null
 
         fun from(context: Context): AppContainer =

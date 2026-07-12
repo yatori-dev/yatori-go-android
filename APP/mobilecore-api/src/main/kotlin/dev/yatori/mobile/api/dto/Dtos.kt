@@ -101,6 +101,7 @@ data class LogEntry(
     val id: Long, val time: String, val level: String,
     val source: String, val platform: String = "", val message: String,
     val account: String? = "",
+    val timestampMicros: Long? = null,
 )
 
 data class LogResult(

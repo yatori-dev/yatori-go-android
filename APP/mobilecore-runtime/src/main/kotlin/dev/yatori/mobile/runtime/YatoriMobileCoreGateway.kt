@@ -27,6 +27,7 @@ class YatoriMobileCoreGateway(
     override suspend fun runTask(session: SessionData, task: TaskItem, options: Map<String, Any>) =
         core.runTask(session, task, options)
 
+    override fun setLogNotifier(onLogsAvailable: (() -> Unit)?) = core.setLogNotifier(onLogsAvailable)
     override suspend fun getLogs(cursor: String) = core.getLogs(cursor)
     override suspend fun clearLogs() = core.clearLogs()
     override suspend fun setLogLevel(level: String) = core.setLogLevel(level)

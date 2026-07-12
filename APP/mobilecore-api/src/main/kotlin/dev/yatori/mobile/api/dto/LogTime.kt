@@ -31,15 +31,24 @@ fun LogEntry.localReadableLine(zoneId: ZoneId = ZoneId.systemDefault()): String 
     return "${localFullTime(zoneId)} [$lvl] $src${if (plat.isNotBlank()) "($plat)" else ""}: $msg"
 }
 
+/** Event timestamp used to merge Go and Android logs; old persisted logs fall back to [time]. */
+fun LogEntry.eventTimeMicros(zoneId: ZoneId = ZoneId.systemDefault()): Long? =
+    timestampMicros ?: parseLogInstant(time.trim(), zoneId)?.let { instant ->
+        instant.epochSecond * MICROS_PER_SECOND + instant.nano / NANOS_PER_MICRO
+    }
+
 private fun formatLogTime(raw: String, formatter: DateTimeFormatter, zoneId: ZoneId): String {
     val value = raw.trim()
     if (value.isEmpty()) return raw
-    val zoned = parseLogTime(value, zoneId) ?: return raw
+    val zoned = parseLogInstant(value, zoneId)?.atZone(zoneId) ?: return raw
     return zoned.format(formatter)
 }
 
-private fun parseLogTime(value: String, zoneId: ZoneId): ZonedDateTime? =
-    runCatching { Instant.parse(value).atZone(zoneId) }.getOrNull()
-        ?: runCatching { OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME).atZoneSameInstant(zoneId) }.getOrNull()
-        ?: runCatching { ZonedDateTime.parse(value, DateTimeFormatter.ISO_ZONED_DATE_TIME).withZoneSameInstant(zoneId) }.getOrNull()
-        ?: runCatching { LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME).atZone(zoneId) }.getOrNull()
+private fun parseLogInstant(value: String, fallbackZone: ZoneId): Instant? =
+    runCatching { Instant.parse(value) }.getOrNull()
+        ?: runCatching { OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant() }.getOrNull()
+        ?: runCatching { ZonedDateTime.parse(value, DateTimeFormatter.ISO_ZONED_DATE_TIME).toInstant() }.getOrNull()
+        ?: runCatching { LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME).atZone(fallbackZone).toInstant() }.getOrNull()
+
+private const val MICROS_PER_SECOND = 1_000_000L
+private const val NANOS_PER_MICRO = 1_000

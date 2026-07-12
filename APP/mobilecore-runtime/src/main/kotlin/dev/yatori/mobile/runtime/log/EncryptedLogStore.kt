@@ -81,8 +81,9 @@ class EncryptedLogStore(
             for (entry in entries) writeFrame(out, entry)
         }
         diskFrameCount += entries.size
-        val merged = liveState.value + entries
-        liveState.value = if (merged.size > LIVE_CAP) merged.takeLast(LIVE_CAP) else merged
+        val merged = (liveState.value + entries).distinctBy { it.source to it.id }
+        val ordered = stableChronologicalOrder(merged)
+        liveState.value = if (ordered.size > LIVE_CAP) ordered.takeLast(LIVE_CAP) else ordered
         if (diskFrameCount > FILE_COMPACT_THRESHOLD) compactCurrentSession()
     }
 
@@ -102,7 +103,7 @@ class EncryptedLogStore(
     fun seedIfNeeded() {
         if (seeded) return
         seeded = true
-        val all = readFile(sessionFile)
+        val all = stableChronologicalOrder(readFile(sessionFile).distinctBy { it.source to it.id })
         diskFrameCount = all.size
         liveState.value = if (all.size > LIVE_CAP) all.takeLast(LIVE_CAP) else all
     }
@@ -138,16 +139,17 @@ class EncryptedLogStore(
 
     // ── read ─────────────────────────────────────────────────────────────────────
 
-    /** Decrypts the full current session, in append order. */
+    /** Decrypts and chronologically orders the full current session. */
     @Synchronized
-    fun readCurrentSession(): List<LogEntry> = readFile(sessionFile)
+    fun readCurrentSession(): List<LogEntry> =
+        stableChronologicalOrder(readFile(sessionFile).distinctBy { it.source to it.id })
 
-    /** Decrypts a named historical file. */
+    /** Decrypts and chronologically orders a named historical file. */
     @Synchronized
     fun readHistory(name: String): List<LogEntry> {
         val f = File(dir, name)
         require(f.parentFile == dir) { "history file must live in the log dir" }
-        return readFile(f)
+        return stableChronologicalOrder(readFile(f).distinctBy { it.source to it.id })
     }
 
     private fun readFile(file: File): List<LogEntry> {
