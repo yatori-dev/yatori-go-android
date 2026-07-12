@@ -31,19 +31,13 @@ fun interface TaskChallengeProgress {
 }
 
 fun interface CaptchaRecognizer {
-    fun recognizeCaptchaBase64(platformId: String, imageBase64: String, outputCols: Int?): String?
+    suspend fun recognizeCaptchaBase64(platformId: String, imageBase64: String, outputCols: Int?): String?
 }
 
 class TaskChallengeController(
     private val runner: CourseTaskRunner,
     private val recognizer: CaptchaRecognizer,
 ) {
-    constructor(runner: CourseTaskRunner, ocr: OcrEngine) : this(
-        runner,
-        CaptchaRecognizer { platformId, imageBase64, outputCols ->
-            ocr.recognizeCaptchaBase64(platformId, imageBase64, outputCols)
-        },
-    )
 
     @Volatile private var requestManualAll = false
     private val currentById = mutableMapOf<String, PendingTaskChallenge>()

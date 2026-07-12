@@ -3,6 +3,10 @@ package dev.yatori.mobile.app.di
 import android.content.Context
 import dev.yatori.captcha.OcrDecoder
 import dev.yatori.captcha.OcrEngine
+import dev.yatori.mobile.app.ocr.ManagedOcrRecognizer
+import dev.yatori.mobile.app.ocr.OCR_IDLE_TIMEOUT_MS
+import dev.yatori.mobile.app.ocr.OcrEngineRecognizer
+import dev.yatori.mobile.app.ui.courses.CaptchaRecognizer
 import dev.yatori.mobile.app.ui.theme.ThemePrefs
 import dev.yatori.mobile.app.update.AppUpdateController
 import dev.yatori.mobile.runtime.MobilecoreStore
@@ -414,24 +418,48 @@ class AppContainer private constructor(context: Context) {
 
     /** Shared login controller so AddAccount and ChallengeManual continue the same flow. */
     val loginController by lazy {
-        dev.yatori.mobile.app.ui.courses.LoginController(repository, ocrEngine)
+        dev.yatori.mobile.app.ui.courses.LoginController(repository, ocrRecognizer)
     }
 
     /** Shared task captcha controller for chapter-test / BBS web character challenges. */
     val taskChallengeController by lazy {
-        dev.yatori.mobile.app.ui.courses.TaskChallengeController(repository, ocrEngine)
+        dev.yatori.mobile.app.ui.courses.TaskChallengeController(repository, ocrRecognizer)
     }
 
-    /** OCR engine is lazy + heavy; loaded on first captcha need. */
-    val ocrEngine: OcrEngine by lazy {
-        val model = appContext.assets.let { runCatching { it.open("common_old.onnx").use { s -> s.readBytes() } } }
-            .getOrElse { ByteArray(0) }
-        val chars = appContext.assets.let { runCatching { it.open("charcode.json").use { s -> s.bufferedReader().readText() } } }
-            .getOrElse { "[]" }
-        // calc_det.onnx: optional arithmetic-captcha detection model (qingshuxuetang)
-        val calcDet = appContext.assets.let { runCatching { it.open("calc_det.onnx").use { s -> s.readBytes() } } }
-            .getOrNull()
-        OcrEngine(model, OcrDecoder(chars), calcDetModelBytes = calcDet)
+    /**
+     * Models are loaded independently on first real recognition request, reused briefly, then
+     * closed after 30 idle seconds. Asset reads, ORT session creation and inference run on Default.
+     */
+    private val managedOcrRecognizer by lazy {
+        val decoder by lazy {
+            val chars = runCatching {
+                appContext.assets.open("charcode.json").use { it.bufferedReader().readText() }
+            }.getOrElse { "[]" }
+            OcrDecoder(chars)
+        }
+        ManagedOcrRecognizer(
+            scope = appScope,
+            workerDispatcher = Dispatchers.Default,
+            idleTimeoutMillis = OCR_IDLE_TIMEOUT_MS,
+            commonFactory = {
+                val model = runCatching {
+                    appContext.assets.open("common_old.onnx").use { it.readBytes() }
+                }.getOrElse { ByteArray(0) }
+                OcrEngineRecognizer(OcrEngine(model, decoder))
+            },
+            calcFactory = {
+                val model = runCatching {
+                    appContext.assets.open("calc_det.onnx").use { it.readBytes() }
+                }.getOrNull()
+                OcrEngineRecognizer(OcrEngine(null, decoder, calcDetModelBytes = model))
+            },
+        )
+    }
+
+    private val ocrRecognizer by lazy {
+        CaptchaRecognizer { platformId, imageBase64, outputCols ->
+            managedOcrRecognizer.recognizeCaptchaBase64(platformId, imageBase64, outputCols)
+        }
     }
 
     companion object {

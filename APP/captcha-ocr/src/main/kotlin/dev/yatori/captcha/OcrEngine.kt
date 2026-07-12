@@ -21,13 +21,15 @@ import java.nio.FloatBuffer
  * back to the OCR path (lower accuracy for arithmetic expressions).
  */
 class OcrEngine(
-    modelBytes: ByteArray,
+    modelBytes: ByteArray?,
     private val decoder: OcrDecoder,
     calcDetModelBytes: ByteArray? = null,
 ) : Closeable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession = env.createSession(modelBytes, OrtSession.SessionOptions())
+    private val session: OrtSession? = modelBytes?.let {
+        env.createSession(it, OrtSession.SessionOptions())
+    }
     private val calcDetSession: OrtSession? = calcDetModelBytes?.let {
         runCatching { env.createSession(it, OrtSession.SessionOptions()) }.getOrNull()
     }
@@ -279,8 +281,9 @@ class OcrEngine(
     }
 
     private fun runInference(data: FloatArray, inShape: LongArray): String {
+        val activeSession = session ?: return ""
         OnnxTensor.createTensor(env, FloatBuffer.wrap(data), inShape).use { input ->
-            session.run(mapOf(INPUT_NAME to input)).use { result ->
+            activeSession.run(mapOf(INPUT_NAME to input)).use { result ->
                 val onnxValue = try {
                     result.get(OUTPUT_NAME).get()
                 } catch (_: Exception) {
@@ -339,7 +342,7 @@ class OcrEngine(
         }
 
     override fun close() {
-        runCatching { session.close() }
+        runCatching { session?.close() }
         runCatching { calcDetSession?.close() }
     }
 

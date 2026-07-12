@@ -37,7 +37,7 @@ fun interface LoginProgress {
  */
 class LoginController(
     private val repo: YatoriCoreRepository,
-    private val ocr: OcrEngine,
+    private val ocr: CaptchaRecognizer,
 ) {
     @Volatile private var requestManual = false
 

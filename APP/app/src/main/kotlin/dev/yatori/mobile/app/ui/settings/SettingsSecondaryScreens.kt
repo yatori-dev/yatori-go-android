@@ -91,22 +91,9 @@ fun AdvancedDiagnosticsScreen(container: AppContainer, nav: Navigator) {
     }
 }
 
-/** About OCR: engine load state, model info, platform support, preprocessing notes. */
+/** About OCR: model info and platform support. Does not initialize either OCR model. */
 @Composable
 fun OcrDiagnosticsScreen(container: AppContainer, nav: Navigator) {
-    var ocrStatus by remember { mutableStateOf("检测中…") }
-    var calcDetAvail by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-    LaunchedEffect(Unit) {
-        runCatching {
-            container.ocrEngine
-            ocrStatus = "引擎已就绪"
-            calcDetAvail = runCatching {
-                context.assets.open("calc_det.onnx").close()
-                true
-            }.getOrDefault(false)
-        }.onFailure { ocrStatus = "引擎加载失败：${it.message}" }
-    }
     SecondaryScaffold(title = "关于 OCR", nav = nav) { innerPadding ->
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -115,20 +102,16 @@ fun OcrDiagnosticsScreen(container: AppContainer, nav: Navigator) {
         ) {
             SectionLabel("引擎状态")
             Card(insideMargin = PaddingValues(16.dp)) {
-                BasicComponent(title = "状态", summary = ocrStatus)
-                BasicComponent(title = "文字识别", summary = "common_old.onnx")
-                BasicComponent(
-                    title = "算术检测",
-                    summary = if (calcDetAvail) "calc_det.onnx" else "calc_det.onnx（未找到）",
-                )
+                BasicComponent(title = "常规验证码", summary = "common_old.onnx")
+                BasicComponent(title = "QSXT算术验证码", summary = "calc_det.onnx")
             }
 
             SectionLabel("平台支持")
             Card(insideMargin = PaddingValues(16.dp)) {
-                BasicComponent(title = "英华学堂", summary = "文字 OCR")
-                BasicComponent(title = "重庆工程学院", summary = "文字 OCR")
-                BasicComponent(title = "学习通", summary = "文字 OCR")
-                BasicComponent(title = "青书学堂", summary = if (calcDetAvail) "算术检测" else "算术检测（回退 OCR）")
+                BasicComponent(title = "英华学堂", summary = "常规验证码识别")
+                BasicComponent(title = "重庆工程学院", summary = "常规验证码识别")
+                BasicComponent(title = "学习通", summary = "常规验证码识别")
+                BasicComponent(title = "青书学堂", summary = "算术验证码自动计算")
             }
         }
     }
